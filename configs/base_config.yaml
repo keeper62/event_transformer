@@ -6,7 +6,8 @@ base_config:
     ffn_dim: 2048
     max_len: 512
 
-    embedding_class: "CustomEmbeddings"  # Name of the embedding class to use
+    # Embedding in event_transformer/models/embeddings.py 
+    embedding_class: "CustomEmbeddings"  # Name of embedding class
     layers:
       - "MultiHeadAttention"
       - "FeedForward"
