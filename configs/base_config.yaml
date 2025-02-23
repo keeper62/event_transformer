@@ -1,0 +1,14 @@
+base_config:
+    vocab_size: 30522
+    hidden_dim: 512
+    num_heads: 8
+    num_layers: 6
+    ffn_dim: 2048
+    max_len: 512
+
+    embedding_class: "CustomEmbeddings"  # Name of the embedding class to use
+    layers:
+      - "MultiHeadAttention"
+      - "FeedForward"
+      - "MultiHeadAttention"
+      - "FeedForward"
