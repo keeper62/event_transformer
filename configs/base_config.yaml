@@ -7,9 +7,12 @@ base_config:
     max_len: 512
 
     # Embedding in event_transformer/models/embeddings.py 
-    embedding_class: "CustomEmbeddings"  # Name of embedding class
-    layers:
-      - "MultiHeadAttention"
-      - "FeedForward"
-      - "MultiHeadAttention"
-      - "FeedForward"
+    rpe: True
+    rpe_class: "T5RPE"
+
+    # APE in event_transformer/models/position.py 
+    ape: False
+    ape_class: "AbsolutePosition"
+
+    # Encoder in event_transformer/models/encoder.py
+    encoder_class: "" # Name of encoder class

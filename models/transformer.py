@@ -1,5 +1,6 @@
 import torch.nn as nn
 import importlib
+from .embeddings import Embeddings
 
 
 class Transformer(nn.Module):
@@ -7,9 +8,7 @@ class Transformer(nn.Module):
         super().__init__()
 
         # Load embedding class dynamically
-        embedding_module = importlib.import_module("models.embeddings")
-        embedding_class = getattr(embedding_module, config["embedding_class"])
-        self.embedding = embedding_class(config)
+        self.embedding = Embeddings(config)
 
         # Load Transformer layers dynamically
         encoder_module = importlib.import_module("models.encoder")

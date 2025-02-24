@@ -1,6 +1,6 @@
 import yaml
 import torch
-from models.transformer import Transformer
+from models import Transformer
 
 def load_config(config_path):
     with open(config_path, 'r') as file:
