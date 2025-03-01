@@ -1,6 +1,6 @@
 base_config:
-    vocab_size: 30522
-    hidden_dim: 512
+    vocab_size: 1024
+    embed_dim: 512
     num_heads: 8
     num_layers: 6
     ffn_dim: 2048
@@ -8,11 +8,11 @@ base_config:
 
     # Embedding in event_transformer/models/embeddings.py 
     rpe: True
-    rpe_class: "T5RPE"
+    rpe_class: "RelativePosition"
 
     # APE in event_transformer/models/position.py 
     ape: False
-    ape_class: "AbsolutePosition"
+    ape_class: "LearnableAbsolutePosition"
 
     # Encoder in event_transformer/models/encoder.py
     encoder_class: "" # Name of encoder class

@@ -8,8 +8,8 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         self.attn = MultiHeadAttention(config)
         self.ffn = FeedForward(config)
-        self.norm1 = nn.LayerNorm(config['hidden_dim'])
-        self.norm2 = nn.LayerNorm(config['hidden_dim'])
+        self.norm1 = nn.LayerNorm(config['embed_dim'])
+        self.norm2 = nn.LayerNorm(config['embed_dim'])
     
     def forward(self, x):
         attn_out = self.attn(x)
