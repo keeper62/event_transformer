@@ -23,7 +23,7 @@ def evaluate_model(model, dataloader, device):
 
 if __name__ == "__main__":
     from models.transformer import Transformer
-    from data.dataset import CustomDataset
+    from data.bgl_dataset import CustomDataset
     from torch.utils.data import DataLoader
     
     # Load config

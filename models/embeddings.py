@@ -1,29 +1,25 @@
-import torch
 import torch.nn as nn
 import importlib
-from .token import TokenEmbedding
 
 class Embeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.token_embedding = TokenEmbedding(vocab_size=config['vocab_size'], embed_size=config['hidden_dim'])
+        self.embedding_layer = nn.Embedding(num_embeddings=config['model']['vocab_size'], embedding_dim=config['model']['embed_dim'], padding_idx=0)
         
-        self.conf_ape = config['ape']
+        self.conf_ape = config['ape']['ape_class']
         
-        if config['ape']:
+        if self.conf_ape:
             position_module = importlib.import_module("models.position")
-            position_class = getattr(position_module, config["ape_class"])
-            self.position_embedding = position_class(d_model=self.token_embedding.embedding_dim, max_len=config['max_len'])
-        
-        self.dropout = nn.Dropout(config.get('dropout', 0.1))  # Custom feature: dropout
+            position_class = getattr(position_module, self.conf_ape)
+            self.position_embedding = position_class(d_model=config['model']['embed_dim'], max_len=config['model']['max_len'])
+
+        self.dropout = nn.Dropout(config['model'].get('dropout', 0.1)) 
     
     def forward(self, x):
-        x = self.token_embedding(x)  # Shape: (batch_size, seq_len, d_model)
+        x = self.embedding_layer(x)
         
         if self.conf_ape:
             positions = self.position_embedding(x)
-            positions = positions[0]  # Pick the first row to get (seq_len, d_model)
-            positions = positions.unsqueeze(0).expand_as(x)  # (batch_size, seq_len, d_model)
+            x = x + positions  # Add positional encoding element-wise
 
-            x = x + positions  # Now the shapes match
-        return self.dropout(x)  # Apply dropout
+        return self.dropout(x.float())  # Apply dropout

@@ -3,7 +3,7 @@ base_config:
 
     # Model Hyperparameters
     model:
-        vocab_size: 1024 # Should be defined during run-time
+        vocab_size: 1024
         embed_dim: 512
         num_heads: 8
         num_layers: 6
@@ -17,14 +17,14 @@ base_config:
 
     # Training Parameters
     training:
-        num_epochs: 2
-        batch_size: 50
+        num_epochs: 10
+        batch_size: 500000
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
         rpe_class: "LearnableRelativePosition" # Either False or String
     ape:
-        ape_class: "AbsolutePosition" # Either False or String
+        ape_class: "LearnableAbsolutePosition" # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:

@@ -1,47 +1,90 @@
-import torch
-import torch.nn as nn
 import importlib
+import torch.nn as nn
+import torch.nn.functional as F
+import torch
+import math
 
-class MultiHeadAttention(nn.Module):
+class BaseAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.num_heads = config['num_heads']
-        self.head_dim = config['hidden_dim'] // self.num_heads
-        self.embed_dim = config['hidden_dim']
-        self.rpe = config.get('rpe', False)
+        self.conf_rpe = config['rpe']['rpe_class']
+        self.dim = config['model']['embed_dim']
+        self.heads = config['model']['num_heads']
+        self.seq_len = config['model']['context_length']
+        self.window_size = config['model']['num_windows']
+        self.scale = (self.dim // self.heads) ** -0.5
 
-        assert self.embed_dim % self.num_heads == 0, "hidden_dim must be divisible by num_heads"
+        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=False)
+        self.out_proj = nn.Linear(self.dim, self.dim)
+        self.dropout = nn.Dropout(config['model']['dropout'])
 
-        self.qkv = nn.Linear(self.embed_dim, self.embed_dim * 3)
-        self.fc_out = nn.Linear(self.embed_dim, self.embed_dim)
+        if self.conf_rpe:
+            position_module = importlib.import_module("models.position")
+            position_class = getattr(position_module, self.conf_rpe)
+            self.position_embedding = position_class(head_dim=self.heads, max_len=self.seq_len)
 
-        if self.rpe:
-            rpe_module = importlib.import_module("models.position")
-            rpe_class = getattr(rpe_module, config['rpe_class'])
-            self.rpe_embedding = rpe_class(d_model=self.embed_dim, max_len=config['max_len'])
+    def apply_attention(self, attn_scores, v, mask, shape):
+        if self.conf_rpe:
+            attn_scores += self.position_embedding(shape).permute(2, 0, 1)
+        
+        if mask:
+            mask_matrix = torch.ones((shape, shape), device=v.device) * float('-inf')
+            for i in range(shape):
+                start, end = max(0, i - self.window_size), min(shape, i + self.window_size + 1)
+                mask_matrix[i, start:end] = 0
+            attn_scores += mask_matrix
+        
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        return torch.matmul(attn_weights, v)
 
-        self.scale = self.head_dim ** -0.5
+    def forward(self, x, mask=True):
+        B, T, C = x.shape
+        H, head_dim = self.heads, C // self.heads
+        qkv = self.qkv(x).reshape(B, T, 3, H, head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        out = self.apply_attention(q, k, v, mask)
+        return self.out_proj(out.permute(0, 2, 1, 3).reshape(B, T, C))
 
-    def forward(self, x):
-        batch_size, seq_len, _ = x.shape
+class MultiHeadAttention(BaseAttention):
+    def apply_attention(self, q, k, v, mask):
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        return super().apply_attention(attn_scores, v, mask, q.shape[2])
 
-        qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (batch, num_heads, seq_len, head_dim)
+class MultiHeadDenseCollaboration(BaseAttention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.conv1 = nn.Conv1d(in_channels=self.heads, out_channels=self.heads, kernel_size=1, groups=self.heads)
+        self.conv2 = nn.Conv1d(in_channels=self.heads, out_channels=self.heads, kernel_size=1, groups=self.heads)
 
-        attn_weights = (q @ k.transpose(-2, -1)) * self.scale  # Shape: (batch, num_heads, seq_len, seq_len)
+    def apply_attention(self, q, k, v, mask):
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn_scores = self.conv2(F.relu(self.conv1(attn_scores.view(attn_scores.shape[0], self.heads, -1)))).view_as(attn_scores)
+        return super().apply_attention(attn_scores, v, mask, q.shape[2])
 
-        if self.rpe:
-            rpe_values = self.rpe_embedding(seq_len)  # Ensure output shape is (seq_len, seq_len, d_model)
-            
-            # Fix dimensional mismatch: reshape RPE to match attention weights
-            rpe_values = rpe_values.permute(2, 0, 1)  # Change to (d_model, seq_len, seq_len)
-            rpe_values = rpe_values.mean(dim=0, keepdim=True)  # Reduce d_model to make it (1, seq_len, seq_len)
-            attn_weights = attn_weights + rpe_values  # Ensure shapes align
+# https://arxiv.org/pdf/2006.16362
+class CollaborativeAttention(BaseAttention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.mixing = self.init_mixing_matrix()
+        self.content_bias = nn.Linear(self.dim, self.heads, bias=False)
 
-        attn_weights = attn_weights.softmax(dim=-1)
+    def init_mixing_matrix(self):
+        mixing = torch.zeros(self.heads, self.dim // self.heads)
 
-        attn_output = attn_weights @ v  # (batch, num_heads, seq_len, head_dim)
-        attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        dim_head = int(math.ceil((self.dim // self.heads) / self.heads))
+        for i in range(self.heads):
+            mixing[i, i * dim_head : (i + 1) * dim_head] = 1.0
 
-        return self.fc_out(attn_output)
+        return nn.Parameter(mixing)
 
+    def apply_attention(self, q, k, v, mask):
+        mixed_query = q * self.mixing.view(self.heads, 1, -1)  # Apply mixing to queries
+        attention_scores = torch.matmul(mixed_query, k.transpose(-2, -1)) * self.scale
+
+        # Reshape k for content bias computation
+        k_reshaped = k.permute(0, 2, 1, 3).reshape(k.shape[0], k.shape[2], -1)  # [B, T, H*D]
+        content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)  # [B, H, 1, T]
+        attention_scores += content_bias
+
+        return super().apply_attention(attention_scores, v, mask, q.shape[2])
