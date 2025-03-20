@@ -1,48 +1,117 @@
+import argparse
 import torch
-from models import Transformer, LogTokenizer, load_all_configs
+import pytorch_lightning as pl
+from models import Transformer, LogTokenizer, load_config
 from dataset_class.bgl_dataset import BGLDataset
-import torch.nn as nn
-from training.trainer import train_model
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import pickle
 import time
+import os
 
-def train_with_config(config, config_name):
-    tokenizer = LogTokenizer()
-    
-    dataset = BGLDataset(path=config['dataset']['path'], 
-                         columns=config['dataset']['columns'], 
-                         transform=tokenizer.transform(), 
-                         max_lines=3000,
-                         data_column="Content")
-    dataset.construct_steps(config['model']['prediction_steps'], config['model']['context_length'])
-    
-    tokenizer.train_template_miner(dataset.data)
-    config['model']['vocab_size'] = tokenizer.get_vocab_size()
-    
-    model = Transformer(config)
-    dataloader = DataLoader(dataset, batch_size=config['training']['batch_size'], shuffle=True)
+class BGLDataModule(pl.LightningDataModule):
+    def __init__(self, config, num_workers):
+        super().__init__()
+        self.config = config
+        self.tokenizer = LogTokenizer()
+        self.num_workers = num_workers
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['training'].get('lr', 1e-4))
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
+    def setup(self, stage=None):
+        dataset = BGLDataset(
+            path=self.config['dataset']['path'], 
+            columns=self.config['dataset']['columns'], 
+            transform=self.tokenizer.transform, 
+            data_column="Content"
+        )
+        dataset.construct_steps(self.config['model']['prediction_steps'], self.config['model']['context_length'])
+        self.tokenizer.train_template_miner(dataset.data)
+        
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        
+        self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
     
-    results = train_model(model, dataloader, optimizer, loss_fn, config['device'], config['model']['vocab_size'], config_name,
-                          save_model=True, visualize=False, num_epochs=config['training'].get('num_epochs', 10))
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], num_workers=self.num_workers, pin_memory=True, shuffle=True, persistent_workers=True)
     
-    return {epoch: {"targets": res["targets"], "predictions": res["predictions"]} for epoch, res in results.items()}
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], num_workers=self.num_workers, pin_memory=True, shuffle=False, persistent_workers=True)
 
-def train_multiple_configs():
-    config_data = load_all_configs()
-    all_results = {}
+class TransformerLightning(pl.LightningModule):
+    def __init__(self, config, config_name):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = Transformer(config)
+        self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
+        self.config_name = config_name
+        self.predictions = []
+        self.targets = []
+
+    def forward(self, x):
+        return self.model(x)
+
+    def training_step(self, batch):
+        inputs, targets = batch
+        outputs = self(inputs)
+        loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
+        self.log('train_loss', loss, prog_bar=True, logger=True)
+        return loss
     
-    for config_name, config in config_data.items():
-        print(f"Training with configuration: {config_name}")
-        all_results[config_name] = train_with_config(config['base_config'], config_name)
+    def validation_step(self, batch):
+        inputs, targets = batch
+        outputs = self(inputs)
+        loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
+        
+        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_loss', loss, prog_bar=True, logger=True, sync_dist=True)
+        
+        self.predictions.append(outputs.detach().cpu())
+        self.targets.append(targets.detach().cpu())
+        
+        return loss
     
-    return all_results
+    def on_validation_epoch_end(self):
+        self.predictions = torch.cat(self.predictions, dim=0)
+        self.targets = torch.cat(self.targets, dim=0)
+        
+        predicted_values = torch.argmax(self.predictions, dim=-1)  # Shape: [20, 20]
+        
+        results = {
+            "predictions": predicted_values.numpy(),
+            "targets": self.targets.numpy()
+        }
+        with open(f'results/{self.config_name}_{int(time.time())}.pkl', 'wb') as f:
+            pickle.dump(results, f)
+        
+        self.predictions = []  # Reset as a list
+        self.targets = []  # Reset as a list
+    
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
+
+def train_with_config(config, config_name, num_gpu, num_nodes, accelerator, num_workers):
+    data_module = BGLDataModule(config, num_workers)
+    model = TransformerLightning(config, config_name)
+    trainer = pl.Trainer(max_epochs=config['training'].get('num_epochs', 10), devices=num_gpu, accelerator=accelerator, num_nodes=num_nodes)
+    trainer.fit(model, datamodule=data_module)
+    
+    # Save model after training
+    model_path = f"save/trained_model_{config_name}.ckpt"
+    trainer.save_checkpoint(model_path)
+    print(f"Model saved to {model_path}")
 
 if __name__ == "__main__":
-    results = train_multiple_configs()
-    with open(f'results/{int(time.time())}_data.p', 'wb') as fp:
-        pickle.dump(results, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    parser = argparse.ArgumentParser(description="Train Transformer model with specified configuration.")
+    parser.add_argument("--config", type=str, default="configs/base_config.yaml", help="Path to the config file.")
+    parser.add_argument("--num_nodes", type=int, default=1, help="Number of distributed nodes.")
+    parser.add_argument("--accelerator", type=str, default="cpu", help="Which accelerator to use.")
+    parser.add_argument("--num_cpu_cores", type=int, default=2, help="Number of CPU cores to use outside of accelerated tasks.")
+    parser.add_argument("--num_accelerators", type=int, default=1, help="Number of GPUs or CPUs to use.")
+    
+    args = parser.parse_args()
+    
+    config, config_name = load_config(args.config), os.path.splitext(os.path.basename(args.config))[0]
+    
+    print(f"Training with configuration: {config_name}")
+    train_with_config(config['base_config'], config_name, args.num_accelerators, args.num_nodes, args.accelerator, args.num_cpu_cores)
     print("Training completed successfully.")
+
