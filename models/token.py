@@ -13,11 +13,9 @@ class LogTokenizer:
         self.event_id_to_template = {}  # Mapping event IDs to templates
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
-    def transform(self):
+    def transform(self, log_message):
         """ Returns a function that encodes log messages into token IDs. """
-        def _transform(log_message):
-            return self.get_event_id(log_message)
-        return _transform
+        return self.get_event_id(log_message)
 
     def train_template_miner(self, log_messages):
         """ Processes logs with Drain3 and stores event templates & event IDs. """

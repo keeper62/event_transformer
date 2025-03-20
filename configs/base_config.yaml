@@ -3,7 +3,7 @@ base_config:
 
     # Model Hyperparameters
     model:
-        vocab_size: 1024
+        vocab_size: 3
         embed_dim: 512
         num_heads: 8
         num_layers: 6
@@ -18,7 +18,7 @@ base_config:
     # Training Parameters
     training:
         num_epochs: 2
-        batch_size: 500000
+        batch_size: 10
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:

@@ -8,7 +8,7 @@ def main():
     tokenizer = LogTokenizer()
     
     # Load dataset
-    dataset = BGLDataset(path=config['dataset']['path'], columns=config['dataset']['columns'], transform=tokenizer.transform(), max_lines=10000, data_column="Content")
+    dataset = BGLDataset(path=config['dataset']['path'], columns=config['dataset']['columns'], transform=tokenizer.transform, max_lines=10000, data_column="Content")
     dataset.construct_steps(config['model']['prediction_steps'], config['model']['context_length'])
     
     tokenizer.train_template_miner(dataset.data)

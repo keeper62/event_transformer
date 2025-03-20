@@ -20,6 +20,7 @@ class BGLDataModule(pl.LightningDataModule):
             path=self.config['dataset']['path'], 
             columns=self.config['dataset']['columns'], 
             transform=self.tokenizer.transform, 
+            max_lines=3000,
             data_column="Content"
         )
         dataset.construct_steps(self.config['model']['prediction_steps'], self.config['model']['context_length'])
@@ -49,42 +50,58 @@ class TransformerLightning(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def training_step(self, batch):
+    def training_step(self, batch, batch_idx):
         inputs, targets = batch
+        device = inputs.device  # Ensure consistency
+
+        # Ensure inputs & targets are on the correct device
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        # Sanity check for target values
+        assert targets.min() >= 0 and targets.max() < self.hparams.config['model']['vocab_size'], \
+            f"Targets out of range: min={targets.min()}, max={targets.max()}, expected < {self.hparams.config['model']['vocab_size']}"
+
         outputs = self(inputs)
         loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
+        
         self.log('train_loss', loss, prog_bar=True, logger=True)
         return loss
     
-    def validation_step(self, batch):
+    def validation_step(self, batch, batch_idx):
         inputs, targets = batch
+        device = inputs.device  # Ensure consistency
+
+        # Ensure inputs & targets are on the correct device
+        inputs, targets = inputs.to(device), targets.to(device)
+
         outputs = self(inputs)
         loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
         
         self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_loss', loss, prog_bar=True, logger=True, sync_dist=True)
-        
-        self.predictions.append(outputs.detach().cpu())
+
+        self.predictions.append(outputs.detach().cpu())  # Move to CPU before storing
         self.targets.append(targets.detach().cpu())
-        
+
         return loss
     
     def on_validation_epoch_end(self):
-        self.predictions = torch.cat(self.predictions, dim=0)
-        self.targets = torch.cat(self.targets, dim=0)
+        if len(self.predictions) > 0:
+            self.predictions = torch.cat(self.predictions, dim=0).cpu()
+            self.targets = torch.cat(self.targets, dim=0).cpu()
+            
+            predicted_values = torch.argmax(self.predictions, dim=-1)
+            
+            results = {
+                "predictions": predicted_values.numpy(),
+                "targets": self.targets.numpy()
+            }
+            os.makedirs("results", exist_ok=True)
+            with open(f'results/{self.config_name}_{int(time.time())}.pkl', 'wb') as f:
+                pickle.dump(results, f)
         
-        predicted_values = torch.argmax(self.predictions, dim=-1)  # Shape: [20, 20]
-        
-        results = {
-            "predictions": predicted_values.numpy(),
-            "targets": self.targets.numpy()
-        }
-        with open(f'results/{self.config_name}_{int(time.time())}.pkl', 'wb') as f:
-            pickle.dump(results, f)
-        
-        self.predictions = []  # Reset as a list
-        self.targets = []  # Reset as a list
-    
+        self.predictions = []
+        self.targets = []
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
 

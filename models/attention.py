@@ -28,7 +28,7 @@ class BaseAttention(nn.Module):
             attn_scores += self.position_embedding(shape).permute(2, 0, 1)
         
         if mask:
-            mask_matrix = torch.ones((shape, shape), device=v.device) * float('-inf')
+            mask_matrix = torch.ones((shape, shape)) * float('-inf')
             for i in range(shape):
                 start, end = max(0, i - self.window_size), min(shape, i + self.window_size + 1)
                 mask_matrix[i, start:end] = 0
