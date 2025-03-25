@@ -1,46 +1,38 @@
 from abc import ABC, abstractmethod
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, columns, data_column, transform=None, max_lines=np.inf):
+    def __init__(self, path, prediction_steps, context_length, transform=None):
         self.path = path
-        self.columns = columns
-        self.max_lines = max_lines
         self.transform = transform
-        self.data_column = data_column
+        self.prediction_steps = prediction_steps
+        self.context_length = context_length
         
-        self.data = self._load_data(self.path)  # Must return a list
-        self.training_data = None
+        self.data = self._read_data(path)
+        
+        self.num_lines = len(self.data)  # Number of loaded lines
 
     @abstractmethod
-    def _load_data(self, path):
-        """Load data and return a list. Must be implemented in subclasses."""
+    def _read_data(self, path):
+        """Read data and return a list. Must be implemented in subclasses."""
         pass
 
-    def construct_steps(self, prediction_steps, context_length):
-        windows = []
-        
-        for i in range(len(self.data) - context_length - prediction_steps + 1):
-            input_window = self.data[i:i+context_length]
-            output_window = self.data[i+context_length:i+context_length+prediction_steps]
-            windows.append((input_window, output_window))
-        
-        self.training_data = windows
-
     def __len__(self):
-        return len(self.training_data)
+        return self.num_lines - self.context_length - self.prediction_steps + 1
 
     def __getitem__(self, idx):
-        assert self.training_data != None, "construct_steps() needs to be called beforehand"
-        input, output = self.training_data[idx] 
+        """Dynamically construct input/output sequences per batch."""
+        input_window = self.data[idx: idx + self.context_length]
+        output_window = self.data[idx + self.context_length: idx + self.context_length + self.prediction_steps]
 
-        # Apply transform function to tokenize sequences
+        # Apply transformation if available
         if self.transform:
-            input = [self.transform(log) for log in input]
-            output = [self.transform(label) for label in output]
-            
-        input, output = torch.tensor(input, dtype=torch.long), torch.tensor(output, dtype=torch.long)
-    
-        return input, output
+            input_window = [self.transform(log) for log in input_window]
+            output_window = [self.transform(log) for log in output_window]
+
+        # Convert to tensor
+        input_window = torch.tensor(input_window, dtype=torch.long)
+        output_window = torch.tensor(output_window, dtype=torch.long)
+
+        return input_window, output_window

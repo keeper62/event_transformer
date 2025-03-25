@@ -26,18 +26,21 @@ class BaseAttention(nn.Module):
     def apply_attention(self, attn_scores, v, mask, shape):
         if self.conf_rpe:
             attn_scores += self.position_embedding(shape).permute(2, 0, 1)
-        
+
         if mask:
-            mask_matrix = torch.ones((shape, shape)) * float('-inf')
+            device = attn_scores.device  # Ensure mask is on the same device as attn_scores
+            mask_matrix = torch.full((shape, shape), float('-inf'), device=device)
+
             for i in range(shape):
                 start, end = max(0, i - self.window_size), min(shape, i + self.window_size + 1)
                 mask_matrix[i, start:end] = 0
-            attn_scores += mask_matrix
-        
+
+            attn_scores += mask_matrix  # Apply the mask
+
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         return torch.matmul(attn_weights, v)
-
+    
     def forward(self, x, mask=True):
         B, T, C = x.shape
         H, head_dim = self.heads, C // self.heads

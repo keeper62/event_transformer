@@ -1,9 +1,9 @@
 base_config:
-    device: "cpu"
+    device: "cuda"
 
     # Model Hyperparameters
     model:
-        vocab_size: 1024 # Should be defined during run-time
+        vocab_size: 1824
         embed_dim: 512
         num_heads: 8
         num_layers: 6
@@ -17,18 +17,18 @@ base_config:
 
     # Training Parameters
     training:
-        num_epochs: 2
-        batch_size: 50
+        num_epochs: 10
+        batch_size: 10000
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
-        rpe_class: "LearnableRelativePosition" # Either False or String
+        rpe_class: False # Either False or String
     ape:
-        ape_class: "AbsolutePosition" # Either False or String
+        ape_class: "LearnableAbsolutePosition" # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:
-        decoder_class: "CollaborativeAttention"  # Specify decoder class
+        decoder_class: "MultiHeadAttention"  # Specify decoder class
 
     # Dataset Settings
     dataset:

@@ -1,17 +1,17 @@
 import torch
 from drain3 import TemplateMiner
+from drain3.file_persistence import FilePersistence
 from transformers import AutoTokenizer
 
 class LogTokenizer:
-    def __init__(self):
+    def __init__(self, state_path):
         """
         Initializes the tokenizer using Drain3 for log messages.
         :param seq_len: Maximum sequence length for tokenized logs.
         :param special_tokens: List of special tokens.
         """
-        self.template_miner = TemplateMiner()
+        self.template_miner = TemplateMiner(persistence_handler=FilePersistence(state_path))
         self.event_id_to_template = {}  # Mapping event IDs to templates
-        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     def transform(self, log_message):
         """ Returns a function that encodes log messages into token IDs. """
@@ -39,3 +39,11 @@ class LogTokenizer:
     def decode_event_id_sequence(self, event_seq):
         """ Converts tokenized event sequence back into a log template. """
         return self.event_id_to_template.get(event_seq, "<UNK>")
+    
+    def load_state(self):
+        """ Loads a previously saved state of the tokenizer. """
+        self.template_miner.load_state()
+        
+    def save_state(self):
+        """ Saves the current state of the tokenizer. """
+        self.template_miner.save_state("For re-use")
