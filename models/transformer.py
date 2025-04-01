@@ -17,7 +17,7 @@ class Transformer(nn.Module):
             decoder_class(config) for _ in range(config['model']["num_layers"])
         ])
         
-        self.fc_out = nn.Linear(config['model']["embed_dim"], self.out_features*config['model']['prediction_steps'])
+        self.fc_out = nn.Linear(config['model']["embed_dim"], self.out_features)
 
     def predict(self, x):
         # Handle single-sequence input by adding batch dimension
@@ -39,7 +39,7 @@ class Transformer(nn.Module):
             x = layer(x)
 
         # Predict only the last token's output
-        return self.fc_out(x[:, -1, :]).view(-1, self.n_steps, self.out_features)
+        return self.fc_out(x[:, -1, :]).view(-1, self.out_features)
 
 
 

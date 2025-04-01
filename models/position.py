@@ -36,8 +36,10 @@ class LearnableAbsolutePosition(nn.Module):
         """Returns learnable positional encodings matching the input sequence length."""
         batch_size, seq_len = x.shape[:2]  # Extract batch size and sequence length
         
+        device = self.pos_embedding.weight.device # Get device of the embedding weights
+        
         # Generate position indices for sequence length
-        positions = torch.arange(seq_len).unsqueeze(0).expand(batch_size, seq_len)  # (batch_size, seq_len)
+        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, seq_len)  # (batch_size, seq_len)
 
         # Get learnable positional embeddings
         return self.pos_embedding(positions)  # Shape: (batch_size, seq_len, d_model)
@@ -72,7 +74,7 @@ class LearnableRelativePosition(nn.Module):
         """
 
         # Compute relative position indices
-        positions = torch.arange(seq_len, dtype=torch.long)
+        positions = torch.arange(seq_len, dtype=torch.long, device=self.relative_position_embeddings.device)
         relative_indices = positions[:, None] - positions[None, :]  # (seq_len, seq_len)
         relative_indices += self.max_len - 1  # Shift indices to positive range
 

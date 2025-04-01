@@ -30,7 +30,7 @@ class LogTokenizer:
 
     def get_vocab_size(self):
         """ Returns the vocabulary size of the Drain3 tokenizer. """
-        return len(self.event_id_to_template)
+        return self.template_miner.drain.clusters_counter
 
     def get_vocab(self):
         """ Returns the vocabulary of the Drain3 tokenizer. """
@@ -38,7 +38,7 @@ class LogTokenizer:
 
     def decode_event_id_sequence(self, event_seq):
         """ Converts tokenized event sequence back into a log template. """
-        return self.event_id_to_template.get(event_seq, "<UNK>")
+        return " ".join(self.template_miner.drain.id_to_cluster.get(event_seq, "<UNK>").log_template_tokens)
     
     def load_state(self):
         """ Loads a previously saved state of the tokenizer. """
