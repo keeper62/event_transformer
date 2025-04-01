@@ -56,26 +56,29 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
 
     def forward(self, x):
-        return self.model(x)
+        return self.model(x)  # Outputs shape: (batch_size, vocab_size)
 
     def training_step(self, batch, batch_idx):
-        inputs, targets = batch
-        outputs = self(inputs)
-        loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
-        self.log('train_loss', loss, prog_bar=True, logger=True)
+        inputs, targets = batch  # Targets shape: (batch_size,)
+        outputs = self(inputs)   # Outputs shape: (batch_size, vocab_size)
         
+        loss = self.loss_fn(outputs, targets)  # No need for reshaping
+        
+        self.log('train_loss', loss, prog_bar=True, logger=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
         inputs, targets = batch
         outputs = self(inputs)
-        loss = self.loss_fn(outputs.view(-1, self.hparams.config['model']['vocab_size']), targets.view(-1))
-        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
 
+        loss = self.loss_fn(outputs, targets)  # No reshaping needed
+        
+        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
         return loss
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
+
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator):
     set_seed(42)  # Ensure reproducibility before training
