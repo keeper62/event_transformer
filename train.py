@@ -5,6 +5,18 @@ from models import Transformer, LogTokenizer, load_config
 from dataset_class.bgl_dataset import BGLDataset
 from torch.utils.data import DataLoader, random_split
 import os
+import random
+import numpy as np
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(42)  # Ensures reproducibility
 
 torch.set_float32_matmul_precision('medium') 
 
@@ -37,6 +49,7 @@ class BGLDataModule(pl.LightningDataModule):
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config, config_name):
         super().__init__()
+        set_seed(42)  # Ensure same initialization each time
         self.save_hyperparameters()
         self.model = Transformer(config)
         self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
@@ -65,6 +78,7 @@ class TransformerLightning(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator):
+    set_seed(42)  # Ensure reproducibility before training
     data_module = BGLDataModule(config)
     model = TransformerLightning(config, config_name)
 
@@ -84,6 +98,8 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
     print(f"Model saved to {model_path}")
 
 if __name__ == "__main__":
+    set_seed(42)  # Ensures all randomness is controlled globally
+    
     parser = argparse.ArgumentParser(description="Train Transformer model with specified configuration.")
     parser.add_argument("--config", type=str, default="configs\\base_config.yaml", help="Path to the config file.")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of distributed nodes.")
