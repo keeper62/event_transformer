@@ -18,7 +18,7 @@ base_config:
     # Training Parameters
     training:
         num_epochs: 10
-        batch_size: 10000
+        batch_size: 1200
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
