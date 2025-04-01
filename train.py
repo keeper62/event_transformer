@@ -21,10 +21,11 @@ set_seed(42)  # Ensures reproducibility
 torch.set_float32_matmul_precision('medium') 
 
 class BGLDataModule(pl.LightningDataModule):
-    def __init__(self, config):
+    def __init__(self, config, test_mode=False):
         super().__init__()
         self.config = config
         self.tokenizer = LogTokenizer("drain3_state.bin")
+        self.test_mode = test_mode  # New flag for testing mode
 
     def setup(self, stage=None):
         dataset = BGLDataset(
@@ -32,6 +33,7 @@ class BGLDataModule(pl.LightningDataModule):
             prediction_steps=self.config['model']['prediction_steps'],
             context_length=self.config['model']['context_length'],
             transform=self.tokenizer.transform, 
+            test_mode=self.test_mode  # Pass test mode to dataset
         )
         self.tokenizer.load_state()
         
@@ -39,7 +41,12 @@ class BGLDataModule(pl.LightningDataModule):
         val_size = len(dataset) - train_size
         
         self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
-    
+
+        # Limit dataset size in test mode
+        if self.test_mode:
+            self.train_dataset = torch.utils.data.Subset(self.train_dataset, range(min(len(self.train_dataset), 100)))
+            self.val_dataset = torch.utils.data.Subset(self.val_dataset, range(min(len(self.val_dataset), 20)))
+
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=8, pin_memory=True)
     
@@ -47,18 +54,22 @@ class BGLDataModule(pl.LightningDataModule):
         return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], shuffle=False, num_workers=8, pin_memory=True)
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config, config_name):
+    def __init__(self, config, config_name, test_mode=False):
         super().__init__()
         set_seed(42)  # Ensure same initialization each time
         self.save_hyperparameters()
         self.model = Transformer(config)
         self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
         self.config_name = config_name
+        self.test_mode = test_mode  # New flag for testing mode
 
     def forward(self, x):
         return self.model(x)  # Outputs shape: (batch_size, vocab_size)
 
     def training_step(self, batch, batch_idx):
+        if self.test_mode and batch_idx > 5:  # Limit to 5 batches in test mode
+            return None
+
         inputs, targets = batch  # Targets shape: (batch_size,)
         outputs = self(inputs)   # Outputs shape: (batch_size, vocab_size)
         
@@ -80,25 +91,29 @@ class TransformerLightning(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
 
 
-def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator):
+def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):
     set_seed(42)  # Ensure reproducibility before training
-    data_module = BGLDataModule(config)
-    model = TransformerLightning(config, config_name)
+    data_module = BGLDataModule(config, test_mode=test_mode)
+    model = TransformerLightning(config, config_name, test_mode=test_mode)
 
     trainer = pl.Trainer(
-        max_epochs=config['training'].get('num_epochs', 10), 
+        max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),  # Reduce epochs in test mode
         devices=num_accelerators, 
         accelerator=accelerator, 
         num_nodes=num_nodes, 
-        strategy='ddp'  # PyTorch Lightning automatically handles DDP
+        strategy='ddp',  # PyTorch Lightning automatically handles DDP
+        logger=not test_mode
     )
 
     trainer.fit(model, datamodule=data_module)
     
-    # Save model after training
-    model_path = f"save/trained_model_{config_name}.ckpt"
-    trainer.save_checkpoint(model_path)
-    print(f"Model saved to {model_path}")
+    # Save model only if not in test mode
+    if not test_mode:
+        model_path = f"save/trained_model_{config_name}.ckpt"
+        trainer.save_checkpoint(model_path)
+        print(f"Model saved to {model_path}")
+    else:
+        print("Test mode: Training completed on a small subset.")
 
 if __name__ == "__main__":
     set_seed(42)  # Ensures all randomness is controlled globally
@@ -108,11 +123,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of distributed nodes.")
     parser.add_argument("--accelerator", type=str, default="cpu", help="Which accelerator to use.")
     parser.add_argument("--num_accelerators", type=int, default=-1, help="Number of GPUs or CPUs to use.")
+    parser.add_argument("--test_mode", action="store_true", help="Enable test mode with a small dataset.")
 
     args = parser.parse_args()
     config, config_name = load_config(args.config), os.path.splitext(os.path.basename(args.config))[0]
 
     print(f"Training with configuration: {config_name}")
     print(f"Arguments: {args}")
-    train_with_config(config['base_config'], config_name, args.num_accelerators, args.num_nodes, args.accelerator)
+    train_with_config(config['base_config'], config_name, args.num_accelerators, args.num_nodes, args.accelerator, test_mode=args.test_mode)
     print("Training completed successfully.")

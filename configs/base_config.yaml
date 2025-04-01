@@ -10,7 +10,7 @@ base_config:
         ffn_dim: 2048
         num_windows: 30  # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 100  # The # steps in the past as input
+        context_length: 10  # The # steps in the past as input
         prediction_steps: 1  # The # steps in the future to predict
         num_groups: 8
         dropout: 0.1

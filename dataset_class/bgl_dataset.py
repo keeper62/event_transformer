@@ -7,3 +7,15 @@ class BGLDataset(AbstractBGLDataset):
         with open(path, "r", encoding="utf8") as f:
             data = [line.split(maxsplit=9)[-1] for line in f]  # Extract last column from each line
         return data
+
+    def _read_data_training(self, path):
+        """Read only the necessary lines and extract the last column."""
+        count = 0
+        data = []
+        with open(path, "r", encoding="utf8") as f:
+            for line in f:
+                if count >= 200:  # Limit to 200 lines for testing
+                    break
+                data.append(line.split(maxsplit=9)[-1])  # Extract last column
+                count += 1
+        return data
