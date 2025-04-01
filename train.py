@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, random_split
 import os
 import random
 import numpy as np
+import torchmetrics
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -56,37 +57,83 @@ class BGLDataModule(pl.LightningDataModule):
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config, config_name, test_mode=False):
         super().__init__()
-        set_seed(42)  # Ensure same initialization each time
+        set_seed(42)
         self.save_hyperparameters()
         self.model = Transformer(config)
         self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
         self.config_name = config_name
-        self.test_mode = test_mode  # New flag for testing mode
+        self.test_mode = test_mode
+        
+        num_classes = config['model']['vocab_size']
+
+        # Define metrics
+        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1)
+        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes)
+        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
+        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5)
+        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes)
+        self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes)
 
     def forward(self, x):
-        return self.model(x)  # Outputs shape: (batch_size, vocab_size)
+        return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        if self.test_mode and batch_idx > 5:  # Limit to 5 batches in test mode
+        if self.test_mode and batch_idx > 5:
             return None
 
-        inputs, targets = batch  # Targets shape: (batch_size,)
-        outputs = self(inputs)   # Outputs shape: (batch_size, vocab_size)
+        inputs, targets = batch
+        outputs = self(inputs)
+
+        loss = self.loss_fn(outputs, targets)
         
-        loss = self.loss_fn(outputs, targets)  # No need for reshaping
-        
+        # Compute metrics
+        acc = self.accuracy(outputs, targets)
+        r1 = self.recall(outputs, targets)
+        prec = self.precision(outputs, targets)
+        f1 = self.f1_score(outputs, targets)
+        top5_acc = self.top5_accuracy(outputs, targets)
+        map_score = self.mAP(outputs, targets)
+        perplexity = torch.exp(loss)  # Perplexity (PPL)
+
+        # Log metrics
         self.log('train_loss', loss, prog_bar=True, logger=True)
+        self.log('train_acc', acc, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_R1', r1, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_precision', prec, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_f1', f1, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_top5_acc', top5_acc, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_mAP', map_score, prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_perplexity', perplexity, prog_bar=True, logger=True, sync_dist=True)
+
         return loss
-    
+
     def validation_step(self, batch, batch_idx):
         inputs, targets = batch
         outputs = self(inputs)
 
-        loss = self.loss_fn(outputs, targets)  # No reshaping needed
-        
-        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
-        return loss
+        loss = self.loss_fn(outputs, targets)
 
+        # Compute metrics
+        acc = self.accuracy(outputs, targets)
+        r1 = self.recall(outputs, targets)
+        prec = self.precision(outputs, targets)
+        f1 = self.f1_score(outputs, targets)
+        top5_acc = self.top5_accuracy(outputs, targets)
+        map_score = self.mAP(outputs, targets)
+        perplexity = torch.exp(loss)  # Perplexity (PPL)
+
+        # Log metrics
+        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_acc', acc, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_R1', r1, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_precision', prec, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_f1', f1, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_top5_acc', top5_acc, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_mAP', map_score, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_perplexity', perplexity, prog_bar=True, logger=True, sync_dist=True)
+
+        return loss
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
 
