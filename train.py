@@ -76,15 +76,18 @@ class TransformerLightning(pl.LightningModule):
         outputs = self(inputs)
         loss = self.loss_fn(outputs, targets)
         
+        preds = torch.argmax(outputs, dim=1).detach()
+        targets = targets.detach()
+        
         # Compute metrics and detach them
         with torch.no_grad():
-            acc = self.accuracy(outputs.detach(), targets.detach())
-            r1 = self.recall(outputs.detach(), targets.detach())
-            prec = self.precision(outputs.detach(), targets.detach())
-            f1 = self.f1_score(outputs.detach(), targets.detach())
-            top5_acc = self.top5_accuracy(outputs.detach(), targets.detach())
-            map_score = self.mAP(outputs.detach(), targets.detach())
-            perplexity = torch.exp(loss.detach())  # Perplexity (PPL)
+            acc = self.accuracy(preds, targets)
+            r1 = self.recall(preds, targets)
+            prec = self.precision(preds, targets)
+            f1 = self.f1_score(preds, targets)
+            top5_acc = self.top5_accuracy(preds, targets)
+            map_score = self.mAP(preds, targets)
+            perplexity = torch.exp(preds)  # Perplexity (PPL)
 
         # Log metrics (convert tensors to Python scalars to avoid memory issues)
         self.log('train_loss', loss.item(), prog_bar=True, logger=True)
