@@ -4,7 +4,7 @@ import importlib
 class Embeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.embedding_layer = nn.Embedding(num_embeddings=config['model']['vocab_size'], embedding_dim=config['model']['embed_dim'], padding_idx=0)
+        self.embedding_layer = nn.Embedding(num_embeddings=config['model']['vocab_size'], embedding_dim=config['model']['embed_dim'])
         
         self.conf_ape = config['ape']['ape_class']
         

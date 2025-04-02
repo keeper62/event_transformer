@@ -7,6 +7,7 @@ def main():
     config = load_config("configs/base_config.yaml")['base_config']
     
     tokenizer = LogTokenizer("drain3_state.bin")
+    tokenizer.load_state()
     
     # Load dataset
     dataset = BGLDataset(
@@ -44,3 +45,5 @@ def main():
         
 if __name__ == "__main__":
     main()
+    
+# Give a probability prediction of how often the autoregressive has happened to give certainty?

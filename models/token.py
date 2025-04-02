@@ -11,8 +11,7 @@ class LogTokenizer:
         :param special_tokens: List of special tokens.
         """
         self.template_miner = TemplateMiner(persistence_handler=FilePersistence(state_path))
-        self.event_id_to_template = {}  # Mapping event IDs to templates
-    
+
     def transform(self, log_message):
         """ Returns a function that encodes log messages into token IDs. """
         return self.get_event_id(log_message)
@@ -20,8 +19,7 @@ class LogTokenizer:
     def train_template_miner(self, log_messages):
         """ Processes logs with Drain3 and stores event templates & event IDs. """
         for log in log_messages:
-            result = self.template_miner.add_log_message(log)
-            self.event_id_to_template[result["cluster_id"] - 1] = result["template_mined"]
+            self.template_miner.add_log_message(log)
             
     def get_event_id(self, log_message):
         """ Retrieves the event ID for a given log message. """
