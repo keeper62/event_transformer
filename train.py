@@ -96,11 +96,6 @@ class TransformerLightning(pl.LightningModule):
         self.log('train/acc', self.train_accuracy.compute(), prog_bar=True, sync_dist=True)
         self.log('train/top5_acc', self.train_top5_acc.compute(), prog_bar=False, sync_dist=True)
         self.log('train/f1', self.train_f1.compute(), prog_bar=True, sync_dist=True)
-        
-        # Reset metrics
-        self.train_accuracy.reset()
-        self.train_top5_acc.reset()
-        self.train_f1.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -114,7 +109,7 @@ class TransformerLightning(pl.LightningModule):
         self.val_f1.update(outputs, targets)
 
         # Log validation loss
-        self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         
         return loss
 
@@ -123,11 +118,6 @@ class TransformerLightning(pl.LightningModule):
         self.log('val/acc', self.val_accuracy.compute(), prog_bar=True, sync_dist=True)
         self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False, sync_dist=True)
         self.log('val/f1', self.val_f1.compute(), prog_bar=True, sync_dist=True)
-        
-        # Reset metrics
-        self.val_accuracy.reset()
-        self.val_top5_acc.reset()
-        self.val_f1.reset()
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
