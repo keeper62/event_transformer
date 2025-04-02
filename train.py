@@ -57,13 +57,13 @@ class TransformerLightning(pl.LightningModule):
         num_classes = config['model']['vocab_size']
 
         # Define metrics with persistent=False to avoid excessive memory usage
-        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, persistent=False)
-        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1, persistent=False)
-        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes, persistent=False)
-        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes, persistent=False)
-        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5, persistent=False)
-        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes, persistent=False)
-        self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes, persistent=False)
+        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1)
+        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes)
+        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
+        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5)
+        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes)
+        self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes)
 
     def forward(self, x):
         return self.model(x)
