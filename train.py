@@ -94,7 +94,7 @@ class TransformerLightning(pl.LightningModule):
         self.log('train_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
 
         # Free memory
-        del inputs, targets, outputs, acc, r1, prec, f1, top5_acc, map_score, perplexity
+        del inputs, targets, outputs, acc, r1, prec, f1, perplexity
         torch.cuda.empty_cache()
         
         return loss
@@ -121,7 +121,7 @@ class TransformerLightning(pl.LightningModule):
         self.log('val_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
 
         # Free memory
-        del inputs, targets, outputs, acc, r1, prec, f1, top5_acc, map_score, perplexity
+        del inputs, targets, outputs, acc, r1, prec, f1, perplexity
         torch.cuda.empty_cache()
 
         return loss
