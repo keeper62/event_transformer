@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, random_split
 import os
 import torchmetrics
 
-pl.seed_everything(42, workers=True)
+pl.seed_everything(42, workers=True, verbose=False)
 
 torch.set_float32_matmul_precision('medium') 
 
@@ -152,10 +152,10 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Transformer model with specified configuration.")
-    parser.add_argument("--config", type=str, default="configs\\base_config.yaml", help="Path to the config file.")
+    parser.add_argument("--config", type=str, default="configs/base_config.yaml", help="Path to the config file.")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of distributed nodes.")
     parser.add_argument("--accelerator", type=str, default="cpu", help="Which accelerator to use.")
-    parser.add_argument("--num_accelerators", type=int, default=-1, help="Number of GPUs or CPUs to use.")
+    parser.add_argument("--num_accelerators", type=int, default=1, help="Number of GPUs or CPUs to use.")
     parser.add_argument("--test_mode", action="store_true", help="Enable test mode with a small dataset.")
 
     args = parser.parse_args()

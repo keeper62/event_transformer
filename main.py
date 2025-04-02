@@ -9,6 +9,8 @@ def main():
     tokenizer = LogTokenizer("drain3_state.bin")
     tokenizer.load_state()
     
+    config['model']['vocab_size'] = tokenizer.get_vocab_size()
+    
     # Load dataset
     dataset = BGLDataset(
         path=config['dataset']['path'], 
@@ -16,8 +18,6 @@ def main():
         context_length=config['model']['context_length'],
         transform=tokenizer.transform, 
     )
-    
-    config['model']['vocab_size'] = tokenizer.get_vocab_size()
     
     # Load Transformer model
     model = Transformer(config)

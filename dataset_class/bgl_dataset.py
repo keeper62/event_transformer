@@ -14,7 +14,7 @@ class BGLDataset(AbstractBGLDataset):
         data = []
         with open(path, "r", encoding="utf8") as f:
             for line in f:
-                if count >= 200:  # Limit to 200 lines for testing
+                if count >= 1000:  # Limit to 200 lines for testing
                     break
                 data.append(line.split(maxsplit=9)[-1])  # Extract last column
                 count += 1
