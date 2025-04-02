@@ -54,10 +54,22 @@ class TransformerLightning(pl.LightningModule):
         num_classes = config['model']['vocab_size']
 
         # Define metrics with persistent=False to avoid excessive memory usage
-        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
-        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1)
-        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes)
-        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
+        self.train_accuracy = torchmetrics.Accuracy(
+            task="multiclass", num_classes=num_classes, average='micro')
+        self.val_accuracy = torchmetrics.Accuracy(
+            task="multiclass", num_classes=num_classes, average='micro')
+        
+        # Top-k metrics are more meaningful for large number of classes
+        self.train_top5_acc = torchmetrics.Accuracy(
+            task="multiclass", num_classes=num_classes, top_k=5)
+        self.val_top5_acc = torchmetrics.Accuracy(
+            task="multiclass", num_classes=num_classes, top_k=5)
+        
+        # Macro average gives equal weight to each class (good for imbalanced data)
+        self.train_f1 = torchmetrics.F1Score(
+            task="multiclass", num_classes=num_classes, average='macro')
+        self.val_f1 = torchmetrics.F1Score(
+            task="multiclass", num_classes=num_classes, average='macro')
 
     def forward(self, x):
         return self.model(x)
@@ -70,24 +82,25 @@ class TransformerLightning(pl.LightningModule):
         outputs = self(inputs)
         loss = self.loss_fn(outputs, targets)
         
-        # Compute metrics and detach them
-        with torch.no_grad():
-            acc = self.accuracy(outputs, targets)
-            r1 = self.recall(outputs, targets)
-            prec = self.precision(outputs, targets)
-            f1 = self.f1_score(outputs, targets)
+        # Update metrics
+        self.train_accuracy.update(outputs, targets)
+        self.train_top5_acc.update(outputs, targets)
+        self.train_f1.update(outputs, targets)
 
-        # Log metrics (convert tensors to Python scalars to avoid memory issues)
-        self.log('train_loss', loss.item(), prog_bar=True, logger=True)
-        self.log('train_acc', acc.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
-
-        # Free memory
-        del inputs, targets, outputs, acc, r1, prec, f1
+        # Log loss immediately
+        self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         
         return loss
+
+    def on_train_epoch_end(self):        
+        self.log('train/acc', self.train_accuracy.compute(), prog_bar=True, sync_dist=True)
+        self.log('train/top5_acc', self.train_top5_acc.compute(), prog_bar=False, sync_dist=True)
+        self.log('train/f1', self.train_f1.compute(), prog_bar=True, sync_dist=True)
+        
+        # Reset metrics
+        self.train_accuracy.reset()
+        self.train_top5_acc.reset()
+        self.train_f1.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -95,23 +108,26 @@ class TransformerLightning(pl.LightningModule):
         outputs = self(inputs)
         loss = self.loss_fn(outputs, targets)
 
-        # Compute metrics
-        acc = self.accuracy(outputs, targets)
-        r1 = self.recall(outputs, targets)
-        prec = self.precision(outputs, targets)
-        f1 = self.f1_score(outputs, targets)
+        # Update metrics
+        self.val_accuracy.update(outputs, targets)
+        self.val_top5_acc.update(outputs, targets)
+        self.val_f1.update(outputs, targets)
 
-        # Log metrics
-        self.log('val_loss', loss.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_acc', acc.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
-
-        # Free memory
-        del inputs, targets, outputs, acc, r1, prec, f1
-
+        # Log validation loss
+        self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True)
+        
         return loss
+
+    def on_validation_epoch_end(self):
+        # Compute and log all validation metrics
+        self.log('val/acc', self.val_accuracy.compute(), prog_bar=True)
+        self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False)
+        self.log('val/f1', self.val_f1.compute(), prog_bar=True)
+        
+        # Reset metrics
+        self.val_accuracy.reset()
+        self.val_top5_acc.reset()
+        self.val_f1.reset()
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
