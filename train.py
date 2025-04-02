@@ -120,9 +120,9 @@ class TransformerLightning(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         # Compute and log all validation metrics
-        self.log('val/acc', self.val_accuracy.compute(), prog_bar=True)
-        self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False)
-        self.log('val/f1', self.val_f1.compute(), prog_bar=True)
+        self.log('val/acc', self.val_accuracy.compute(), prog_bar=True, sync_dist=True)
+        self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False, sync_dist=True)
+        self.log('val/f1', self.val_f1.compute(), prog_bar=True, sync_dist=True)
         
         # Reset metrics
         self.val_accuracy.reset()
