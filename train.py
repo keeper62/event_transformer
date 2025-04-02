@@ -9,7 +9,8 @@ import torchmetrics
 
 pl.seed_everything(42, workers=True, verbose=False)
 
-torch.set_float32_matmul_precision('medium') 
+torch.cuda.empty_cache()
+print(torch.cuda.memory_summary()) 
 
 class BGLDataModule(pl.LightningDataModule):
     def __init__(self, config, test_mode=False):
@@ -39,10 +40,10 @@ class BGLDataModule(pl.LightningDataModule):
             self.val_dataset = torch.utils.data.Subset(self.val_dataset, range(min(len(self.val_dataset), 20)))
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=8, pin_memory=True)
+        return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=4, pin_memory=True)
     
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], shuffle=False, num_workers=8, pin_memory=True)
+        return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], shuffle=False, num_workers=4, pin_memory=True)
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config, config_name, test_mode=False):
@@ -55,14 +56,14 @@ class TransformerLightning(pl.LightningModule):
         
         num_classes = config['model']['vocab_size']
 
-        # Define metrics
-        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
-        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1)
-        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes)
-        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
-        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5)
-        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes)
-        self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes)
+        # Define metrics with persistent=False to avoid excessive memory usage
+        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, persistent=False)
+        self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1, persistent=False)
+        self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes, persistent=False)
+        self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes, persistent=False)
+        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5, persistent=False)
+        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes, persistent=False)
+        self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes, persistent=False)
 
     def forward(self, x):
         return self.model(x)
@@ -73,34 +74,38 @@ class TransformerLightning(pl.LightningModule):
 
         inputs, targets = batch
         outputs = self(inputs)
-
         loss = self.loss_fn(outputs, targets)
         
-        # Compute metrics
-        acc = self.accuracy(outputs, targets)
-        r1 = self.recall(outputs, targets)
-        prec = self.precision(outputs, targets)
-        f1 = self.f1_score(outputs, targets)
-        top5_acc = self.top5_accuracy(outputs, targets)
-        map_score = self.mAP(outputs, targets)
-        perplexity = torch.exp(loss)  # Perplexity (PPL)
+        # Compute metrics and detach them
+        with torch.no_grad():
+            acc = self.accuracy(outputs.detach(), targets.detach())
+            r1 = self.recall(outputs.detach(), targets.detach())
+            prec = self.precision(outputs.detach(), targets.detach())
+            f1 = self.f1_score(outputs.detach(), targets.detach())
+            top5_acc = self.top5_accuracy(outputs.detach(), targets.detach())
+            map_score = self.mAP(outputs.detach(), targets.detach())
+            perplexity = torch.exp(loss.detach())  # Perplexity (PPL)
 
-        # Log metrics
-        self.log('train_loss', loss, prog_bar=True, logger=True)
-        self.log('train_acc', acc, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_R1', r1, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_precision', prec, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_f1', f1, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_top5_acc', top5_acc, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_mAP', map_score, prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_perplexity', perplexity, prog_bar=True, logger=True, sync_dist=True)
+        # Log metrics (convert tensors to Python scalars to avoid memory issues)
+        self.log('train_loss', loss.item(), prog_bar=True, logger=True)
+        self.log('train_acc', acc.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_top5_acc', top5_acc.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_mAP', map_score.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('train_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
 
+        # Free memory
+        del inputs, targets, outputs, acc, r1, prec, f1, top5_acc, map_score, perplexity
+        torch.cuda.empty_cache()
+        
         return loss
 
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         inputs, targets = batch
         outputs = self(inputs)
-
         loss = self.loss_fn(outputs, targets)
 
         # Compute metrics
@@ -110,21 +115,29 @@ class TransformerLightning(pl.LightningModule):
         f1 = self.f1_score(outputs, targets)
         top5_acc = self.top5_accuracy(outputs, targets)
         map_score = self.mAP(outputs, targets)
-        perplexity = torch.exp(loss)  # Perplexity (PPL)
+        perplexity = torch.exp(loss)
 
         # Log metrics
-        self.log('val_loss', loss, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_acc', acc, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_R1', r1, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_precision', prec, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_f1', f1, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_top5_acc', top5_acc, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_mAP', map_score, prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_perplexity', perplexity, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_loss', loss.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_acc', acc.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_top5_acc', top5_acc.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_mAP', map_score.item(), prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
+
+        # Free memory
+        del inputs, targets, outputs, acc, r1, prec, f1, top5_acc, map_score, perplexity
+        torch.cuda.empty_cache()
 
         return loss
+    
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
+    
+    def on_train_epoch_end(self):
+        torch.cuda.empty_cache()
 
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):
@@ -137,7 +150,8 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
         accelerator=accelerator, 
         num_nodes=num_nodes, 
         strategy='ddp',  # PyTorch Lightning automatically handles DDP
-        logger=not test_mode
+        logger=not test_mode,
+        precision=16 if torch.cuda.is_available() else 32,  # Mixed precision if GPU is available
     )
 
     trainer.fit(model, datamodule=data_module)
