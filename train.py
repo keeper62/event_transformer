@@ -5,19 +5,9 @@ from models import Transformer, LogTokenizer, load_config
 from dataset_class.bgl_dataset import BGLDataset
 from torch.utils.data import DataLoader, random_split
 import os
-import random
-import numpy as np
 import torchmetrics
 
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-set_seed(42)  # Ensures reproducibility
+pl.seed_everything(42, workers=True)
 
 torch.set_float32_matmul_precision('medium') 
 
@@ -57,7 +47,6 @@ class BGLDataModule(pl.LightningDataModule):
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config, config_name, test_mode=False):
         super().__init__()
-        set_seed(42)
         self.save_hyperparameters()
         self.model = Transformer(config)
         self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
@@ -139,7 +128,6 @@ class TransformerLightning(pl.LightningModule):
 
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):
-    set_seed(42)  # Ensure reproducibility before training
     data_module = BGLDataModule(config, test_mode=test_mode)
     model = TransformerLightning(config, config_name, test_mode=test_mode)
 
@@ -163,8 +151,6 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
         print("Test mode: Training completed on a small subset.")
 
 if __name__ == "__main__":
-    set_seed(42)  # Ensures all randomness is controlled globally
-    
     parser = argparse.ArgumentParser(description="Train Transformer model with specified configuration.")
     parser.add_argument("--config", type=str, default="configs\\base_config.yaml", help="Path to the config file.")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of distributed nodes.")

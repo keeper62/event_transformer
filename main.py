@@ -4,7 +4,7 @@ import torch
 
 def main():
     # Load Transformer model
-    config = load_config("configs/with_abs_pos.yaml")['base_config']
+    config = load_config("configs/base_config.yaml")['base_config']
     
     tokenizer = LogTokenizer("drain3_state.bin")
     

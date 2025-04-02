@@ -33,7 +33,7 @@ base_config:
     # Dataset Settings
     dataset:
         name: "BGL"
-        path: "data\\BGL\\BGL.log"
+        path: "data/BGL/BGL.log"
         columns: 
             - "Label"
             - "Timestamp"
