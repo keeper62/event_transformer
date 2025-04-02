@@ -61,8 +61,6 @@ class TransformerLightning(pl.LightningModule):
         self.recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, top_k=1)
         self.precision = torchmetrics.Precision(task="multiclass", num_classes=num_classes)
         self.f1_score = torchmetrics.F1Score(task="multiclass", num_classes=num_classes)
-        self.top5_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, top_k=5)
-        self.mAP = torchmetrics.AveragePrecision(task="multiclass", num_classes=num_classes)
         self.confusion_matrix = torchmetrics.ConfusionMatrix(task="multiclass", num_classes=num_classes)
 
     def forward(self, x):
@@ -76,7 +74,7 @@ class TransformerLightning(pl.LightningModule):
         outputs = self(inputs)
         loss = self.loss_fn(outputs, targets)
         
-        preds = torch.argmax(outputs, dim=1).detach()
+        preds = torch.argmax(outputs, dim=-1).detach()
         targets = targets.detach()
         
         # Compute metrics and detach them
@@ -85,8 +83,6 @@ class TransformerLightning(pl.LightningModule):
             r1 = self.recall(preds, targets)
             prec = self.precision(preds, targets)
             f1 = self.f1_score(preds, targets)
-            top5_acc = self.top5_accuracy(preds, targets)
-            map_score = self.mAP(preds, targets)
             perplexity = torch.exp(preds)  # Perplexity (PPL)
 
         # Log metrics (convert tensors to Python scalars to avoid memory issues)
@@ -95,8 +91,6 @@ class TransformerLightning(pl.LightningModule):
         self.log('train_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('train_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('train_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_top5_acc', top5_acc.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('train_mAP', map_score.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('train_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
 
         # Free memory
@@ -116,8 +110,6 @@ class TransformerLightning(pl.LightningModule):
         r1 = self.recall(outputs, targets)
         prec = self.precision(outputs, targets)
         f1 = self.f1_score(outputs, targets)
-        top5_acc = self.top5_accuracy(outputs, targets)
-        map_score = self.mAP(outputs, targets)
         perplexity = torch.exp(loss)
 
         # Log metrics
@@ -126,8 +118,6 @@ class TransformerLightning(pl.LightningModule):
         self.log('val_R1', r1.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('val_precision', prec.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('val_f1', f1.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_top5_acc', top5_acc.item(), prog_bar=True, logger=True, sync_dist=True)
-        self.log('val_mAP', map_score.item(), prog_bar=True, logger=True, sync_dist=True)
         self.log('val_perplexity', perplexity.item(), prog_bar=True, logger=True, sync_dist=True)
 
         # Free memory
