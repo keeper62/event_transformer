@@ -9,9 +9,6 @@ import torchmetrics
 
 pl.seed_everything(42, workers=True, verbose=False)
 
-#torch.cuda.empty_cache()
-#print(torch.cuda.memory_summary()) 
-
 class BGLDataModule(pl.LightningDataModule):
     def __init__(self, config, test_mode=False):
         super().__init__()
@@ -73,15 +70,12 @@ class TransformerLightning(pl.LightningModule):
         outputs = self(inputs)
         loss = self.loss_fn(outputs, targets)
         
-        preds = torch.argmax(outputs, dim=1).detach()
-        targets = targets.detach()
-        
         # Compute metrics and detach them
         with torch.no_grad():
-            acc = self.accuracy(preds, targets)
-            r1 = self.recall(preds, targets)
-            prec = self.precision(preds, targets)
-            f1 = self.f1_score(preds, targets)
+            acc = self.accuracy(outputs, targets)
+            r1 = self.recall(outputs, targets)
+            prec = self.precision(outputs, targets)
+            f1 = self.f1_score(outputs, targets)
 
         # Log metrics (convert tensors to Python scalars to avoid memory issues)
         self.log('train_loss', loss.item(), prog_bar=True, logger=True)
@@ -92,7 +86,6 @@ class TransformerLightning(pl.LightningModule):
 
         # Free memory
         del inputs, targets, outputs, acc, r1, prec, f1
-        torch.cuda.empty_cache()
         
         return loss
 
@@ -117,15 +110,11 @@ class TransformerLightning(pl.LightningModule):
 
         # Free memory
         del inputs, targets, outputs, acc, r1, prec, f1
-        torch.cuda.empty_cache()
 
         return loss
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
-    
-    def on_train_epoch_end(self):
-        torch.cuda.empty_cache()
 
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):
