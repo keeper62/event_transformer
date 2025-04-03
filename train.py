@@ -2,28 +2,35 @@ import argparse
 import torch
 import pytorch_lightning as pl
 from models import Transformer, LogTokenizer, load_config
-from dataset_class.bgl_dataset import BGLDataset
 from torch.utils.data import DataLoader, random_split
 import os
 import torchmetrics
+import importlib
+import sys
 
 pl.seed_everything(42, workers=True, verbose=False)
 
-class BGLDataModule(pl.LightningDataModule):
+sys.path.append(os.path.abspath("."))  
+
+class DataModule(pl.LightningDataModule):
     def __init__(self, config, test_mode=False):
         super().__init__()
         self.config = config
         self.tokenizer = LogTokenizer(config['dataset']['drain_path'])
         self.test_mode = test_mode  # New flag for testing mode
+        
+        dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
+        self.dataset_class = getattr(dataset_module, "Dataset")
 
     def setup(self, stage=None):
-        dataset = BGLDataset(
+        dataset = self.dataset_class(
             path=self.config['dataset']['path'], 
             prediction_steps=self.config['model']['prediction_steps'],
             context_length=self.config['model']['context_length'],
             transform=self.tokenizer.transform, 
             test_mode=self.test_mode  # Pass test mode to dataset
         )
+        
         self.tokenizer.load_state()
         
         train_size = int(0.8 * len(dataset))
@@ -123,8 +130,8 @@ class TransformerLightning(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
 
 
-def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):
-    data_module = BGLDataModule(config, test_mode=test_mode)
+def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):    
+    data_module = DataModule(config, test_mode=test_mode)
     model = TransformerLightning(config, config_name, test_mode=test_mode)
 
     trainer = pl.Trainer(
