@@ -1,10 +1,10 @@
 from .abstract_dataset import AbstractBGLDataset
 
-class LinuxDataset(AbstractBGLDataset):
+class Dataset(AbstractBGLDataset):
     def _read_data(self, path):
         """Read a specific line and extract only the last column."""
         # Load entire file into memory
-        with open(path, "r", encoding="utf8") as f:
+        with open(path, "r") as f:
             data = [line.split(": ")[-1] for line in f]  # Extract last column from each line
         return data
 
@@ -12,7 +12,7 @@ class LinuxDataset(AbstractBGLDataset):
         """Read only the necessary lines and extract the last column."""
         count = 0
         data = []
-        with open(path, "r", encoding="utf8") as f:
+        with open(path, "r") as f:
             for line in f:
                 if count >= 1000:  # Limit to 200 lines for testing
                     break

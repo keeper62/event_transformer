@@ -34,6 +34,7 @@ base_config:
     dataset:
         name: "BGL"
         path: "data/BGL.log"
+        class: "bgl_dataset" # Make sure to use the correct file name for your dataset without .py extension
         drain_path: "drain3_state.bin"
         columns: 
             - "Label"

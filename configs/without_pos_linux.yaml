@@ -18,7 +18,7 @@ base_config:
     # Training Parameters
     training:
         num_epochs: 10
-        batch_size: 600
+        batch_size: 2400
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
@@ -34,6 +34,8 @@ base_config:
     dataset:
         name: "BGL"
         path: "data/Linux.log"
+        class: "linux_dataset" # Make sure to use the correct file name for your dataset without .py extension
+        # class: "linux_dataset" # Make sure to use the correct file name for your dataset without .py extension
         drain_path: "drain3_state_linux.bin"
         columns: 
             - "Label"

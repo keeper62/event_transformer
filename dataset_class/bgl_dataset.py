@@ -1,6 +1,6 @@
 from .abstract_dataset import AbstractBGLDataset
 
-class BGLDataset(AbstractBGLDataset):
+class Dataset(AbstractBGLDataset):
     def _read_data(self, path):
         """Read a specific line and extract only the last column."""
         # Load entire file into memory
