@@ -33,7 +33,8 @@ base_config:
     # Dataset Settings
     dataset:
         name: "BGL"
-        path: "data/BGL/BGL.log"
+        path: "data/BGL.log"
+        drain_path: "drain3_state.bin"
         columns: 
             - "Label"
             - "Timestamp"

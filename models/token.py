@@ -19,7 +19,11 @@ class LogTokenizer:
     def train_template_miner(self, log_messages):
         """ Processes logs with Drain3 and stores event templates & event IDs. """
         for log in log_messages:
-            self.template_miner.add_log_message(log)
+            self.add_log_message(log)
+            
+    def add_log_message(self, log_message):
+        """ Adds a single log message to the template miner. """
+        self.template_miner.add_log_message(log_message)
             
     def get_event_id(self, log_message):
         """ Retrieves the event ID for a given log message. """

@@ -13,7 +13,7 @@ class BGLDataModule(pl.LightningDataModule):
     def __init__(self, config, test_mode=False):
         super().__init__()
         self.config = config
-        self.tokenizer = LogTokenizer("drain3_state.bin")
+        self.tokenizer = LogTokenizer(config['dataset']['drain_path'])
         self.test_mode = test_mode  # New flag for testing mode
 
     def setup(self, stage=None):

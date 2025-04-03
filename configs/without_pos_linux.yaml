@@ -1,40 +1,40 @@
 base_config:
-    device: "cpu"
+    device: "cuda"
 
     # Model Hyperparameters
     model:
-        vocab_size: 1824
+        vocab_size: 1825
         embed_dim: 512
         num_heads: 8
         num_layers: 6
         ffn_dim: 2048
         num_windows: 30  # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 10  # The # steps in the past as input
-        prediction_steps: 1  # The # steps in the future to predict
+        context_length: 100  # The # steps in the past as input
+        prediction_steps: 20  # The # steps in the future to predict
         num_groups: 8
         dropout: 0.1
 
     # Training Parameters
     training:
-        num_epochs: 2
-        batch_size: 10
+        num_epochs: 10
+        batch_size: 600
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
-        rpe_class: "LearnableRelativePosition" # Either False or String
+        rpe_class: False # Either False or String
     ape:
-        ape_class: "LearnableAbsolutePosition" # Either False or String
+        ape_class: False # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:
-        decoder_class: "CollaborativeAttention"  # Specify decoder class
+        decoder_class: "MultiHeadAttention"  # Specify decoder class
 
     # Dataset Settings
     dataset:
         name: "BGL"
-        path: "data/BGL.log"
-        drain_path: "drain3_state.bin"
+        path: "data/Linux.log"
+        drain_path: "drain3_state_linux.bin"
         columns: 
             - "Label"
             - "Timestamp"
