@@ -66,13 +66,11 @@ class TransformerLightning(pl.LightningModule):
         self.val_accuracy = torchmetrics.Accuracy(
             task="multiclass", num_classes=num_classes, average='micro')
         
-        # Top-k metrics are more meaningful for large number of classes
         self.train_top5_acc = torchmetrics.Accuracy(
             task="multiclass", num_classes=num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(
             task="multiclass", num_classes=num_classes, top_k=5)
         
-        # Macro average gives equal weight to each class (good for imbalanced data)
         self.train_f1 = torchmetrics.F1Score(
             task="multiclass", num_classes=num_classes, average='macro')
         self.val_f1 = torchmetrics.F1Score(
@@ -81,50 +79,61 @@ class TransformerLightning(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
+    def _process_batch(self, batch):
+        """Helper to handle input/target processing for the new output shape"""
+        inputs, targets = batch
+        
+        # Model now outputs predictions for all positions (batch_size, seq_len, vocab_size)
+        outputs = self(inputs)  
+        
+        # Reshape for loss/metrics: (batch_size*seq_len, vocab_size) vs (batch_size*seq_len)
+        return (
+            outputs.view(-1, outputs.size(-1)),  # Flatten all predictions
+            targets.view(-1)                     # Flatten all targets
+        )
+
     def training_step(self, batch, batch_idx):
         if self.test_mode and batch_idx > 5:
             return None
 
-        inputs, targets = batch
-        outputs = self(inputs)
-        loss = self.loss_fn(outputs, targets)
+        logits, targets = self._process_batch(batch)
+        loss = self.loss_fn(logits, targets)
         
-        # Update metrics
-        self.train_accuracy.update(outputs, targets)
-        self.train_top5_acc.update(outputs, targets)
-        self.train_f1.update(outputs, targets)
+        # Update metrics (operate on flattened outputs)
+        self.train_accuracy(logits, targets)
+        self.train_top5_acc(logits, targets)
+        self.train_f1(logits, targets)
 
-        # Log loss immediately
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
-        
         return loss
 
     def on_train_epoch_end(self):        
         self.log('train/acc', self.train_accuracy.compute(), prog_bar=True, sync_dist=True)
         self.log('train/top5_acc', self.train_top5_acc.compute(), prog_bar=False, sync_dist=True)
         self.log('train/f1', self.train_f1.compute(), prog_bar=True, sync_dist=True)
+        self.train_accuracy.reset()
+        self.train_top5_acc.reset()
+        self.train_f1.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        inputs, targets = batch
-        outputs = self(inputs)
-        loss = self.loss_fn(outputs, targets)
+        logits, targets = self._process_batch(batch)
+        loss = self.loss_fn(logits, targets)
 
-        # Update metrics
-        self.val_accuracy.update(outputs, targets)
-        self.val_top5_acc.update(outputs, targets)
-        self.val_f1.update(outputs, targets)
+        self.val_accuracy(logits, targets)
+        self.val_top5_acc(logits, targets)
+        self.val_f1(logits, targets)
 
-        # Log validation loss
         self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
-        
         return loss
 
     def on_validation_epoch_end(self):
-        # Compute and log all validation metrics
         self.log('val/acc', self.val_accuracy.compute(), prog_bar=True, sync_dist=True)
         self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False, sync_dist=True)
         self.log('val/f1', self.val_f1.compute(), prog_bar=True, sync_dist=True)
+        self.val_accuracy.reset()
+        self.val_top5_acc.reset()
+        self.val_f1.reset()
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
