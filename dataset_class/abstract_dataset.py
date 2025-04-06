@@ -32,14 +32,16 @@ class AbstractBGLDataset(Dataset, ABC):
         """Dynamically construct input/output sequences per batch."""
         input_window = self.data[idx: idx + self.context_length]
         output = self.data[idx + self.context_length + 1]
+        
+        output_window = input_window[1:] + [output]  # Shifted input window for output
 
         # Apply transformation if available
         if self.transform:
             input_window = [self.transform(log) for log in input_window]
-            output = self.transform(output)  # No list wrapping needed here
+            output_window = [self.transform(log) for log in output_window]  # No list wrapping needed here
 
         # Convert to tensor
         input_window = torch.tensor(input_window, dtype=torch.long)
-        output = torch.tensor(output, dtype=torch.long)
+        output_window = torch.tensor(output_window, dtype=torch.long)
 
-        return input_window, output
+        return input_window, output_window

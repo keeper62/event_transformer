@@ -39,7 +39,8 @@ class Transformer(nn.Module):
             x = layer(x)
 
         # Predict only the last token's output
-        return self.fc_out(x[:, -1, :]).view(-1, self.out_features)
+        logits = self.fc_out(x)  # (batch_size, seq_len, vocab_size)
+        return logits
 
 
 
