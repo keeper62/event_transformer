@@ -1,14 +1,60 @@
 import argparse
 import torch
 import pytorch_lightning as pl
+from models import load_config
+from training import DataModule, TransformerLightning
 import os
 import sys
 
-from training import DataModule, TransformerLightning
-from models.utils import load_config
-
 pl.seed_everything(42, workers=True, verbose=False)
 sys.path.append(os.path.abspath("."))  
+
+from pytorch_lightning.callbacks import Callback, EarlyStopping
+
+class EarlyEpochStopping(Callback):
+    def __init__(self, min_batches=100, patience=50, tol=0.001):
+        """
+        Args:
+            min_batches (int): Minimum batches before checking for plateaus.
+            patience (int): Number of batches to wait before stopping epoch.
+            tol (float): Minimum relative change to consider improvement.
+        """
+        self.min_batches = min_batches
+        self.patience = patience
+        self.tol = tol
+        self.batch_losses = []
+        self.batches_without_improvement = 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        loss = outputs if isinstance(outputs, torch.Tensor) else outputs["loss"]
+        self.batch_losses.append(loss.detach().cpu().item())
+
+        # Only check after `min_batches` have been processed
+        if len(self.batch_losses) < self.min_batches:
+            return
+
+        # Check if loss has improved significantly
+        recent_losses = self.batch_losses[-self.patience:]
+        if len(recent_losses) < 2:
+            return
+
+        # Compute relative change
+        rel_change = abs(recent_losses[-1] - recent_losses[-2]) / (recent_losses[-2] + 1e-8)
+
+        if rel_change < self.tol:
+            self.batches_without_improvement += 1
+        else:
+            self.batches_without_improvement = 0
+
+        # If no improvement for `patience` batches, stop the epoch early
+        if self.batches_without_improvement >= self.patience:
+            print(f"Stopping epoch early (batch {batch_idx}) due to plateau.")
+            trainer.should_stop = True  # Forces current epoch to end
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        # Reset at the start of each epoch
+        self.batch_losses = []
+        self.batches_without_improvement = 0
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):    
     data_module = DataModule(config, test_mode=test_mode)
@@ -21,7 +67,15 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
         num_nodes=num_nodes, 
         strategy='ddp',  # PyTorch Lightning automatically handles DDP
         logger=not test_mode,
-        precision=16 if torch.cuda.is_available() else 32  # Mixed precision if GPU is available
+        precision=16 if torch.cuda.is_available() else 32,  # Mixed precision if GPU is available
+        callbacks=[
+            EarlyEpochStopping(
+            min_batches=100,  # Wait at least 100 batches before checking
+            patience=15,      # Stop epoch if no improvement in 50 batches
+            tol=0.001         # Minimum relative change to count as improvement
+            ),
+            EarlyStopping(monitor="val/loss", patience=3)  # Normal early stopping
+        ]
     )
 
     trainer.fit(model, datamodule=data_module)
