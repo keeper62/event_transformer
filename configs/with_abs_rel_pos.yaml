@@ -3,7 +3,7 @@ base_config:
 
     # Model Hyperparameters
     model:
-        vocab_size: 1824
+        vocab_size: 1825
         embed_dim: 512
         num_heads: 8
         num_layers: 6
