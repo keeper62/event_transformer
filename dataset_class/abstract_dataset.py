@@ -30,8 +30,12 @@ class AbstractBGLDataset(Dataset, ABC):
 
     def __getitem__(self, idx):
         """Dynamically construct input/output sequences per batch."""
-        input_window = self.data[idx: idx + self.context_length]
-        output = self.data[idx + self.context_length + 1]
+        data, timestamps = [d[0] for d in self.data], [d[1] for d in self.data]
+        
+        input_window = data[idx: idx + self.context_length]
+        output = data[idx + self.context_length + 1]
+        
+        input_timestamps = timestamps[idx: idx + self.context_length]
         
         output_window = input_window[1:] + [output]  # Shifted input window for output
 
@@ -42,6 +46,7 @@ class AbstractBGLDataset(Dataset, ABC):
 
         # Convert to tensor
         input_window = torch.tensor(input_window, dtype=torch.long)
+        input_timestamps = torch.tensor(input_timestamps, dtype=torch.float32)
         output_window = torch.tensor(output_window, dtype=torch.long)
 
-        return input_window, output_window
+        return input_window, output_window, input_timestamps

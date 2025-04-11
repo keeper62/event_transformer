@@ -1,5 +1,6 @@
 import torch.nn as nn
 import importlib
+import torch
 
 class Embeddings(nn.Module):
     def __init__(self, config):
@@ -15,11 +16,14 @@ class Embeddings(nn.Module):
 
         self.dropout = nn.Dropout(config['model'].get('dropout', 0.1)) 
     
-    def forward(self, x):
+    def forward(self, x, timestamps):
         x = self.embedding_layer(x)
         
         if self.conf_ape:
-            positions = self.position_embedding(x)
+            if self.conf_ape == "UnixTimeDeltaPosition":
+                positions = self.position_embedding(timestamps)
+            else:
+                positions = self.position_embedding(x)
             x = x + positions  # Add positional encoding element-wise
 
         return self.dropout(x.float())  # Apply dropout

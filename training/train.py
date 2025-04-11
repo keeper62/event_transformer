@@ -69,15 +69,15 @@ class TransformerLightning(pl.LightningModule):
         self.val_f1 = torchmetrics.F1Score(
             task="multiclass", num_classes=num_classes, average='macro')
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, timestamps):
+        return self.model(x, timestamps)
 
     def _process_batch(self, batch):
         """Helper to handle input/target processing for the new output shape"""
-        inputs, targets = batch
+        inputs, targets, timestamps = batch
         
         # Model now outputs predictions for all positions (batch_size, seq_len, vocab_size)
-        outputs = self(inputs)  
+        outputs = self(inputs, timestamps)  
         
         # Reshape for loss/metrics: (batch_size*seq_len, vocab_size) vs (batch_size*seq_len)
         return (

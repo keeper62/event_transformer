@@ -24,7 +24,7 @@ base_config:
     rpe:
         rpe_class: False # Either False or String
     ape:
-        ape_class: False # Either False or String
+        ape_class: "UnixTimeDeltaPosition" # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:

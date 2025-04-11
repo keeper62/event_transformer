@@ -82,3 +82,28 @@ class LearnableRelativePosition(nn.Module):
         relative_embeddings = self.relative_position_embeddings[relative_indices]  # (seq_len, seq_len, dim)
 
         return relative_embeddings
+
+class UnixTimeDeltaPosition(nn.Module):
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        self.embedding = nn.Linear(1, d_model)  # Projects deltas to d_model
+
+    def forward(self, unix_timestamps):
+        """
+        Args:
+            unix_timestamps: [batch_size, seq_len]
+        Returns:
+            time_embeddings: [batch_size, seq_len, d_model]
+        """
+        # Normalize each sequence to start at t=0
+        timestamps = unix_timestamps - unix_timestamps[:, :1]  # [batch_size, seq_len]
+
+        # Compute deltas (diff between consecutive timestamps)
+        deltas = torch.zeros_like(timestamps)
+        deltas[:, 1:] = timestamps[:, 1:] - timestamps[:, :-1]  # [batch_size, seq_len]
+
+        # Log-scale deltas (add 1 to avoid log(0))
+        deltas = torch.log1p(deltas).unsqueeze(-1)  # [batch_size, seq_len, 1]
+
+        # Project to embedding space
+        return self.embedding(deltas)  # [batch_size, seq_len, d_model]

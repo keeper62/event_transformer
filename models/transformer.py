@@ -32,8 +32,8 @@ class Transformer(nn.Module):
         
         return results.argmax(dim=-1).squeeze(0).tolist()
 
-    def forward(self, x):
-        x = self.embedding_layer(x)  # Apply embedding
+    def forward(self, x, timestamps):
+        x = self.embedding_layer(x, timestamps)  # Apply embedding
             
         for layer in self.decoder_layers:
             x = layer(x)
