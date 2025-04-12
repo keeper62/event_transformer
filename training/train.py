@@ -129,4 +129,4 @@ class TransformerLightning(pl.LightningModule):
         self.val_f1.reset()
     
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-4))
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-5))

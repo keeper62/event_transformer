@@ -21,6 +21,7 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
         strategy='ddp',  # PyTorch Lightning automatically handles DDP
         logger=not test_mode,
         precision=16 if torch.cuda.is_available() else 32,  # Mixed precision if GPU is available
+        gradient_clip_val=1.0  # Gradient clipping
     )
 
     trainer.fit(model, datamodule=data_module)
