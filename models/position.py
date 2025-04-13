@@ -104,6 +104,11 @@ class UnixTimeDeltaPosition(nn.Module):
 
         # Log-scale deltas (add 1 to avoid log(0))
         deltas = torch.log1p(deltas).unsqueeze(-1)  # [batch_size, seq_len, 1]
+        
+        # Normalize to [0, 1] range per sequence
+        min_vals = deltas.min(dim=1, keepdim=True).values
+        max_vals = deltas.max(dim=1, keepdim=True).values
+        norm_deltas = (deltas - min_vals) / (max_vals - min_vals + 1e-8)  # Add epsilon to avoid divide-by-zero
 
         # Project to embedding space
-        return self.embedding(deltas)  # [batch_size, seq_len, d_model]
+        return self.embedding(norm_deltas)  # [batch_size, seq_len, d_model]

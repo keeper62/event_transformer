@@ -10,43 +10,42 @@ class AbstractBGLDataset(Dataset, ABC):
         self.context_length = context_length
         self.test_mode = test_mode
         
-        if self.test_mode: self.data = self._read_data_training(path) 
-        else: self.data = self._read_data(path)
+        if self.test_mode:
+            self.data = self._read_data_training(path)
+        else:
+            self.data = self._read_data(path)
+
+        # Unpack and store tensors separately for speed
+        data, timestamps = zip(*self.data)
+        self.tokens = list(data)  # still raw strings or transformed later
+        self.timestamps = torch.tensor(timestamps, dtype=torch.float32)
         
-        self.num_lines = len(self.data)  # Number of loaded lines
+        self.num_lines = len(self.tokens)
 
     @abstractmethod
     def _read_data(self, path):
-        """Read data and return a list. Must be implemented in subclasses."""
         pass
-    
+
     @abstractmethod
     def _read_data_training(self, path):
-        """Read data and return a list. Must be implemented in subclasses for test_mode to work."""
         pass
 
     def __len__(self):
         return max(0, self.num_lines - self.context_length - self.prediction_steps + 1)
 
     def __getitem__(self, idx):
-        """Dynamically construct input/output sequences per batch."""
-        data, timestamps = [d[0] for d in self.data], [d[1] for d in self.data]
-        
-        input_window = data[idx: idx + self.context_length]
-        output = data[idx + self.context_length + 1]
-        
-        input_timestamps = timestamps[idx: idx + self.context_length]
-        
-        output_window = input_window[1:] + [output]  # Shifted input window for output
+        input_window = self.tokens[idx: idx + self.context_length]
+        output = self.tokens[idx + self.context_length + 1]
+        output_window = input_window[1:] + [output]
 
-        # Apply transformation if available
         if self.transform:
             input_window = [self.transform(log) for log in input_window]
-            output_window = [self.transform(log) for log in output_window]  # No list wrapping needed here
+            output_window = [self.transform(log) for log in output_window]
 
-        # Convert to tensor
         input_window = torch.tensor(input_window, dtype=torch.long)
-        input_timestamps = torch.tensor(input_timestamps, dtype=torch.float32)
         output_window = torch.tensor(output_window, dtype=torch.long)
 
+        input_timestamps = self.timestamps[idx: idx + self.context_length]
+
         return input_window, output_window, input_timestamps
+
