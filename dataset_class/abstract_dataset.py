@@ -21,6 +21,14 @@ class AbstractBGLDataset(Dataset, ABC):
 
         self.num_lines = len(self.data)
 
+    @abstractmethod
+    def _read_data(self, path):
+        pass
+
+    @abstractmethod
+    def _read_data_training(self, path):
+        pass
+
     def __len__(self):
         return max(0, self.num_lines - self.context_length - self.prediction_steps + 1)
 
