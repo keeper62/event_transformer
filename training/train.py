@@ -31,10 +31,6 @@ class DataModule(pl.LightningDataModule):
         
         self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
 
-        # Limit dataset size in test mode
-        if self.test_mode:
-            self.train_dataset = torch.utils.data.Subset(self.train_dataset, range(min(len(self.train_dataset), 100)))
-            self.val_dataset = torch.utils.data.Subset(self.val_dataset, range(min(len(self.val_dataset), 20)))
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
@@ -93,17 +89,18 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         
         # Update metrics (operate on flattened outputs)
-        self.train_accuracy(logits, targets)
-        self.train_top5_acc(logits, targets)
-        self.train_f1(logits, targets)
-
-        self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.train_accuracy.update(logits, targets)
+        self.train_top5_acc.update(logits, targets)
+        self.train_f1.update(logits, targets)
+        
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/accuracy", self.train_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("train/top5_accuracy", self.train_top5_acc, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/f1_macro", self.train_f1, on_step=False, on_epoch=True, sync_dist=True)
+        
         return loss
 
     def on_train_epoch_end(self):        
-        self.log('train/acc', self.train_accuracy.compute(), prog_bar=True, sync_dist=True)
-        self.log('train/top5_acc', self.train_top5_acc.compute(), prog_bar=False, sync_dist=True)
-        self.log('train/f1', self.train_f1.compute(), prog_bar=True, sync_dist=True)
         self.train_accuracy.reset()
         self.train_top5_acc.reset()
         self.train_f1.reset()
@@ -113,17 +110,16 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
 
-        self.val_accuracy(logits, targets)
-        self.val_top5_acc(logits, targets)
-        self.val_f1(logits, targets)
+        self.val_accuracy.update(logits, targets)
+        self.val_top5_acc.update(logits, targets)
+        self.val_f1.update(logits, targets)
 
-        self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("val/accuracy", self.val_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("val/top5_accuracy", self.val_top5_acc, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("val/f1_macro", self.val_f1, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
     def on_validation_epoch_end(self):
-        self.log('val/acc', self.val_accuracy.compute(), prog_bar=True, sync_dist=True)
-        self.log('val/top5_acc', self.val_top5_acc.compute(), prog_bar=False, sync_dist=True)
-        self.log('val/f1', self.val_f1.compute(), prog_bar=True, sync_dist=True)
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
         self.val_f1.reset()
