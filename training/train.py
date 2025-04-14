@@ -1,6 +1,6 @@
 import torchmetrics
 import importlib
-from models import Transformer, LogTokenizer
+from models import Transformer, LogTokenizer, compute_class_weights
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
@@ -10,27 +10,38 @@ class DataModule(pl.LightningDataModule):
         super().__init__()
         self.config = config
         self.tokenizer = LogTokenizer(config['dataset']['drain_path'])
-        self.test_mode = test_mode  # New flag for testing mode
+        self.test_mode = test_mode
         
         dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
         self.dataset_class = getattr(dataset_module, "Dataset")
+        self.train_dataset = None
+        self.val_dataset = None
+        self.setup_f = False
 
     def setup(self, stage=None):
-        dataset = self.dataset_class(
-            path=self.config['dataset']['path'], 
-            prediction_steps=self.config['model']['prediction_steps'],
-            context_length=self.config['model']['context_length'],
-            transform=self.tokenizer.transform, 
-            test_mode=self.test_mode  # Pass test mode to dataset
-        )
-        
-        self.tokenizer.load_state()
-        
-        train_size = int(0.8 * len(dataset))
-        val_size = len(dataset) - train_size
-        
-        self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
+        if not self.setup_f:
+            dataset = self.dataset_class(
+                path=self.config['dataset']['path'], 
+                prediction_steps=self.config['model']['prediction_steps'],
+                context_length=self.config['model']['context_length'],
+                transform=self.tokenizer.transform, 
+                test_mode=self.test_mode
+            )
 
+            self.tokenizer.load_state()
+
+            train_size = int(0.8 * len(dataset))
+            val_size = len(dataset) - train_size
+
+            self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
+        
+            self.setup_f = True
+
+    def get_class_weights(self):
+        if self.train_dataset is None:
+            self.setup()
+
+        return compute_class_weights(self.train_dataset, self.config['model']['vocab_size'], self.test_mode)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
@@ -39,13 +50,18 @@ class DataModule(pl.LightningDataModule):
         return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config, config_name, test_mode=False):
+    def __init__(self, config, config_name, test_mode=False, class_weights=None):
         super().__init__()
         self.save_hyperparameters()
         self.model = Transformer(config)
-        self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
         self.config_name = config_name
         self.test_mode = test_mode
+        
+        # Use weighted loss if provided
+        if class_weights is not None:
+            self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
+        else:
+            self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
         
         num_classes = config['model']['vocab_size']
 

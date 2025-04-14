@@ -11,7 +11,7 @@ sys.path.append(os.path.abspath("."))
 
 def train_with_config(config, config_name, num_accelerators, num_nodes, accelerator, test_mode=False):    
     data_module = DataModule(config, test_mode=test_mode)
-    model = TransformerLightning(config, config_name, test_mode=test_mode)
+    model = TransformerLightning(config, config_name, test_mode=test_mode, class_weights=data_module.get_class_weights())
 
     trainer = pl.Trainer(
         max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),  # Reduce epochs in test mode
