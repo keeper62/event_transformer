@@ -19,9 +19,8 @@ def load_all_configs(config_dir="configs"):
 from collections import Counter
 import torch
 
-def compute_class_weights(dataset, vocab_size, test_mode=False):
-    if test_mode: dataset = dataset.dataset
-    log_ids = [log_id for log_id, _ in dataset.data]
+def compute_class_weights(dataset, vocab_size):
+    log_ids = [log_id for log_id, _ in dataset.dataset.data]
     counter = Counter(log_ids)
 
     weights = torch.zeros(vocab_size)

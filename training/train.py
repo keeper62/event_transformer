@@ -41,7 +41,7 @@ class DataModule(pl.LightningDataModule):
         if self.train_dataset is None:
             self.setup()
 
-        return compute_class_weights(self.train_dataset, self.config['model']['vocab_size'], self.test_mode)
+        return compute_class_weights(self.train_dataset, self.config['model']['vocab_size'])
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.config['training']['batch_size'], shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
