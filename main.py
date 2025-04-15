@@ -1,5 +1,5 @@
 from models import Transformer, LogTokenizer, load_config
-from dataset_class.bgl_dataset import BGLDataset
+from dataset_class.bgl_dataset import Dataset
 import torch
 
 def main():
@@ -12,7 +12,7 @@ def main():
     config['model']['vocab_size'] = tokenizer.get_vocab_size()
     
     # Load dataset
-    dataset = BGLDataset(
+    dataset = Dataset(
         path=config['dataset']['path'], 
         prediction_steps=config['model']['prediction_steps'],
         context_length=config['model']['context_length'],
