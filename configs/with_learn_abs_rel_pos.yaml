@@ -18,13 +18,13 @@ base_config:
     # Training Parameters
     training:
         num_epochs: 10
-        batch_size: 1200
+        batch_size: 600
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
         rpe_class: "LearnableRelativePosition" # Either False or String
     ape:
-        ape_class: "LearnableAbsolutePosition" # Either False or String
+        ape_class: False # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:
