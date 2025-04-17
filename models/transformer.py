@@ -1,46 +1,70 @@
+import torch
 import torch.nn as nn
 import importlib
+from typing import Dict, Any
 from .embeddings import Embeddings
 
 class Transformer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]):
         super().__init__()
         
-        self.out_features = config['model']['vocab_size']
-        self.n_steps = config['model']['prediction_steps']
+        model_cfg = config['model']
+        self.out_features: int = model_cfg['vocab_size']
+        self.n_steps: int = model_cfg['prediction_steps']
         
-        self.embedding_layer = Embeddings(config)
+        # Embedding layer
+        self.embedding_layer: nn.Module = Embeddings(config)
         
+        # Dynamically load decoder layer class
         decoder_module = importlib.import_module("models.decoder")
         decoder_class = getattr(decoder_module, "TransformerDecoderLayer")
-        self.decoder_layers = nn.ModuleList([
-            decoder_class(config) for _ in range(config['model']["num_layers"])
+        
+        self.decoder_layers: nn.ModuleList = nn.ModuleList([
+            decoder_class(config) for _ in range(model_cfg["num_layers"])
         ])
         
-        self.fc_out = nn.Linear(config['model']["embed_dim"], self.out_features)
+        self.fc_out: nn.Linear = nn.Linear(model_cfg["embed_dim"], self.out_features)
 
-    def predict(self, x):
-        # Handle single-sequence input by adding batch dimension
-        if x.dim() == 1:  # If input is (T,)
-            x = x.unsqueeze(0)  # Convert to (1, T)
-            
-        results = self.forward(x)
-        
-        # Remove batch dimension if single-sequence was input
-        if results.shape[0] == 1:
-            results = results.squeeze(0)  # Convert (1, n_steps, out_features) → (n_steps, out_features)
-        
-        return results.argmax(dim=-1).squeeze(0).tolist()
+    def forward(self, x: torch.Tensor, timestamps: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the Transformer model.
 
-    def forward(self, x, timestamps):
-        x = self.embedding_layer(x, timestamps)  # Apply embedding
-            
+        Args:
+            x (torch.Tensor): Token indices of shape (batch_size, seq_len)
+            timestamps (torch.Tensor): Timestamps for positional encoding
+
+        Returns:
+            torch.Tensor: Logits of shape (batch_size, seq_len, vocab_size)
+        """
+        x = self.embedding_layer(x, timestamps)
+
         for layer in self.decoder_layers:
             x = layer(x)
 
-        # Predict only the last token's output
-        logits = self.fc_out(x)  # (batch_size, seq_len, vocab_size)
+        logits = self.fc_out(x)
         return logits
 
+    def predict(self, x: torch.Tensor, timestamps: torch.Tensor) -> list[int]:
+        """
+        Predict method for autoregressive decoding or classification.
 
+        Args:
+            x (torch.Tensor): Input token indices of shape (seq_len,) or (batch_size, seq_len)
 
+        Returns:
+            list[int]: Predicted class indices
+        """
+        # Handle single-sequence input
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # (1, seq_len)
+
+        # Dummy timestamps for inference if not provided
+        timestamps = torch.zeros_like(x, dtype=torch.float32)
+
+        logits = self.forward(x, timestamps)
+
+        # Remove batch dimension if single sequence
+        if logits.shape[0] == 1:
+            logits = logits.squeeze(0)  # (seq_len, vocab_size)
+
+        return logits.argmax(dim=-1).tolist()
