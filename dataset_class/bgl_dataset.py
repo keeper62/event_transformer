@@ -12,7 +12,7 @@ class Dataset(AbstractBGLDataset):
         data = []
         with open(path, "r", encoding="utf8") as f:
             for i, line in enumerate(f):
-                if i >= 10000:
+                if i >= 1000:
                     break
                 parts = line.split(maxsplit=9)
                 data.append((parts[-1], int(parts[1])))

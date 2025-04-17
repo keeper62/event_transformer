@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 import torch
 from torch.utils.data import Dataset
-from models.utils import reduce_sequence_by_entropy
 
 class AbstractBGLDataset(Dataset, ABC):
     def __init__(self, path, prediction_steps, context_length, transform=None, test_mode=False): #time window in seconds
@@ -17,7 +16,6 @@ class AbstractBGLDataset(Dataset, ABC):
             self.data = self._read_data(path)
         
         self.data = [(self.transform(d), t) for d, t in self.data]
-        self.data = reduce_sequence_by_entropy(self.data, window_size=context_length+1, stride=1, num_bins=5)
 
         # Unpack and store tensors separately for speed
         data, timestamps = zip(*self.data)
