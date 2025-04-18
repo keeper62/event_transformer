@@ -71,8 +71,8 @@ class TransformerLightning(pl.LightningModule):
         self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         
-        self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
-        self.val_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
+        self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='micro')
+        self.val_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='micro')
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
@@ -102,7 +102,7 @@ class TransformerLightning(pl.LightningModule):
 
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-
+        
         # Mask out padding tokens (index 0)
         mask = targets != 0
         logits, targets = logits[mask], targets[mask]
