@@ -33,7 +33,7 @@ class DataModule(pl.LightningDataModule):
             train_size = int(0.8 * len(dataset))
             val_size = len(dataset) - train_size
 
-            self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
+            self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
         
             self.setup_f = True
 
