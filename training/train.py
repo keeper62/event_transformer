@@ -67,19 +67,19 @@ class TransformerLightning(pl.LightningModule):
 
         # Define metrics with persistent=False to avoid excessive memory usage
         self.train_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro').to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro').to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, average='micro')
         
         self.train_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5).to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5).to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, top_k=5)
         
         self.train_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro').to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, average='macro')
         self.val_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro').to(torch.device("cpu"))
+            task="multiclass", num_classes=num_classes, average='macro')
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
@@ -96,6 +96,33 @@ class TransformerLightning(pl.LightningModule):
             outputs.view(-1, outputs.size(-1)),  # Flatten all predictions
             targets.view(-1)                     # Flatten all targets
         )
+        
+    def on_fit_start(self):
+        # Force all metrics to CPU
+        device = torch.device("cpu")
+        self.train_accuracy = torchmetrics.classification.MulticlassAccuracy(
+            num_classes=self.num_classes
+        ).to(device)
+    
+        self.train_top5_acc = torchmetrics.classification.MulticlassAccuracy(
+            num_classes=self.num_classes, top_k=5
+        ).to(device)
+    
+        self.train_f1 = torchmetrics.classification.MulticlassF1Score(
+            num_classes=self.num_classes, average="macro"
+        ).to(device)
+    
+        self.val_accuracy = torchmetrics.classification.MulticlassAccuracy(
+            num_classes=self.num_classes
+        ).to(device)
+    
+        self.val_top5_acc = torchmetrics.classification.MulticlassAccuracy(
+            num_classes=self.num_classes, top_k=5
+        ).to(device)
+    
+        self.val_f1 = torchmetrics.classification.MulticlassF1Score(
+            num_classes=self.num_classes, average="macro"
+        ).to(device)
 
     def training_step(self, batch, batch_idx):
         if self.test_mode and batch_idx > 5:
