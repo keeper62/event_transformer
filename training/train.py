@@ -131,6 +131,14 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
+        # Apply mask: keep only non-pad targets
+        mask = targets != 0
+        logits = logits[mask]
+        targets = targets[mask]
+        
+        logits = logits.float()
+        targets = targets.long()
+        
         # Update metrics (operate on flattened outputs)
         self.train_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
         self.train_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
