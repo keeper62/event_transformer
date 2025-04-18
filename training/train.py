@@ -85,17 +85,6 @@ class TransformerLightning(pl.LightningModule):
             targets.view(-1)                     # [B*T]
         )
 
-    def on_fit_start(self):
-        # Move metrics to CPU to reduce GPU memory pressure
-        device = torch.device("cpu")
-        self.train_accuracy = self.train_accuracy.to(device)
-        self.train_top5_acc = self.train_top5_acc.to(device)
-        self.train_f1 = self.train_f1.to(device)
-
-        self.val_accuracy = self.val_accuracy.to(device)
-        self.val_top5_acc = self.val_top5_acc.to(device)
-        self.val_f1 = self.val_f1.to(device)
-
     def training_step(self, batch, batch_idx):
         if self.test_mode and batch_idx > 5:
             return None
@@ -108,9 +97,9 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = logits[mask], targets[mask]
 
         # Update metrics
-        self.train_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
-        self.train_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
-        self.train_f1.update(logits.detach().cpu(), targets.detach().cpu())
+        self.train_accuracy.update(logits, targets)
+        self.train_top5_acc.update(logits, targets)
+        self.train_f1.update(logits, targets)
 
         # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -136,9 +125,9 @@ class TransformerLightning(pl.LightningModule):
         mask = targets != 0
         logits, targets = logits[mask], targets[mask]
 
-        self.val_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
-        self.val_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
-        self.val_f1.update(logits.detach().cpu(), targets.detach().cpu())
+        self.val_accuracy.update(logits, targets)
+        self.val_top5_acc.update(logits, targets)
+        self.val_f1.update(logits, targets)
 
         return loss
 
