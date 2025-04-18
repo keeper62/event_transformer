@@ -103,9 +103,9 @@ class TransformerLightning(pl.LightningModule):
 
     def on_train_epoch_end(self):
         # Compute and log metrics manually
-        self.log("train/accuracy", self.train_accuracy.compute(), on_epoch=True, sync_dist=True)
-        self.log("train/top5_accuracy", self.train_top5_acc.compute(), on_epoch=True, sync_dist=True)
-        self.log("train/f1_micro", self.train_f1.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("train/accuracy", self.train_accuracy.compute())
+        self.log("train/top5_accuracy", self.train_top5_acc.compute())
+        self.log("train/f1_micro", self.train_f1.compute(), prog_bar=True)
 
         # Always reset!
         self.train_accuracy.reset()
@@ -124,9 +124,9 @@ class TransformerLightning(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        self.log("val/accuracy", self.val_accuracy.compute(), on_epoch=True, sync_dist=True)
-        self.log("val/top5_accuracy", self.val_top5_acc.compute(), on_epoch=True, sync_dist=True)
-        self.log("val/f1_micro", self.val_f1.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("val/accuracy", self.val_accuracy.compute())
+        self.log("val/top5_accuracy", self.val_top5_acc.compute())
+        self.log("val/f1_micro", self.val_f1.compute(), prog_bar=True)
 
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
