@@ -57,7 +57,6 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.test_mode = test_mode
         
-        # Use weighted loss if provided
         if class_weights is not None:
             self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
         else:
@@ -65,64 +64,37 @@ class TransformerLightning(pl.LightningModule):
         
         self.num_classes = config['model']['vocab_size']
 
-        # Define metrics with persistent=False to avoid excessive memory usage
-        self.train_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=self.num_classes, average='micro')
-        self.val_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=self.num_classes, average='micro')
+        # Define metrics — will move them to CPU later
+        self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
+        self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         
-        self.train_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=self.num_classes, top_k=5)
-        self.val_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=self.num_classes, top_k=5)
+        self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
+        self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         
-        self.train_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=self.num_classes, average='macro')
-        self.val_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=self.num_classes, average='macro')
+        self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
+        self.val_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
 
     def _process_batch(self, batch):
-        """Helper to handle input/target processing for the new output shape"""
         inputs, targets, timestamps = batch
-        
-        # Model now outputs predictions for all positions (batch_size, seq_len, vocab_size)
-        outputs = self(inputs, timestamps)  
-        
-        # Reshape for loss/metrics: (batch_size*seq_len, vocab_size) vs (batch_size*seq_len)
+        outputs = self(inputs, timestamps)
         return (
-            outputs.view(-1, outputs.size(-1)),  # Flatten all predictions
-            targets.view(-1)                     # Flatten all targets
+            outputs.view(-1, outputs.size(-1)),  # [B*T, C]
+            targets.view(-1)                     # [B*T]
         )
-        
+
     def on_fit_start(self):
-        # Force all metrics to CPU
+        # Move metrics to CPU to reduce GPU memory pressure
         device = torch.device("cpu")
-        self.train_accuracy = torchmetrics.classification.MulticlassAccuracy(
-            num_classes=self.num_classes
-        ).to(device)
+        self.train_accuracy = self.train_accuracy.to(device)
+        self.train_top5_acc = self.train_top5_acc.to(device)
+        self.train_f1 = self.train_f1.to(device)
 
-        self.train_top5_acc = torchmetrics.classification.MulticlassAccuracy(
-            num_classes=self.num_classes, top_k=5
-        ).to(device)
-
-        self.train_f1 = torchmetrics.classification.MulticlassF1Score(
-            num_classes=self.num_classes, average="macro"
-        ).to(device)
-
-        self.val_accuracy = torchmetrics.classification.MulticlassAccuracy(
-            num_classes=self.num_classes
-        ).to(device)
-
-        self.val_top5_acc = torchmetrics.classification.MulticlassAccuracy(
-            num_classes=self.num_classes, top_k=5
-        ).to(device)
-
-        self.val_f1 = torchmetrics.classification.MulticlassF1Score(
-            num_classes=self.num_classes, average="macro"
-        ).to(device)
+        self.val_accuracy = self.val_accuracy.to(device)
+        self.val_top5_acc = self.val_top5_acc.to(device)
+        self.val_f1 = self.val_f1.to(device)
 
     def training_step(self, batch, batch_idx):
         if self.test_mode and batch_idx > 5:
@@ -130,31 +102,27 @@ class TransformerLightning(pl.LightningModule):
 
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
-        # Apply mask: keep only non-pad targets
+
+        # Mask out padding tokens (index 0)
         mask = targets != 0
-        logits = logits[mask]
-        targets = targets[mask]
-        
-        logits = logits.float()
-        targets = targets.long()
-        
-        logits = logits.detach().cpu()
-        targets = targets.detach().cpu()
-        
-        # Update metrics (operate on flattened outputs)
-        self.train_accuracy.update(logits, targets)
-        self.train_top5_acc.update(logits, targets)
-        self.train_f1.update(logits, targets)
-        
+        logits, targets = logits[mask], targets[mask]
+
+        # Update metrics
+        self.train_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
+        self.train_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
+        self.train_f1.update(logits.detach().cpu(), targets.detach().cpu())
+
+        # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/accuracy", self.train_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        self.log("train/top5_accuracy", self.train_top5_acc, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("train/f1_macro", self.train_f1, on_step=False, on_epoch=True, sync_dist=True)
-        
         return loss
 
-    def on_train_epoch_end(self):        
+    def on_train_epoch_end(self):
+        # Compute and log metrics manually
+        self.log("train/accuracy", self.train_accuracy.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("train/top5_accuracy", self.train_top5_acc.compute(), on_epoch=True, sync_dist=True)
+        self.log("train/f1_macro", self.train_f1.compute(), on_epoch=True, sync_dist=True)
+
+        # Always reset!
         self.train_accuracy.reset()
         self.train_top5_acc.reset()
         self.train_f1.reset()
@@ -163,31 +131,28 @@ class TransformerLightning(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
-        # Apply mask: keep only non-pad targets
+
+        # Mask out padding
         mask = targets != 0
-        logits = logits[mask]
-        targets = targets[mask]
-        
-        logits = logits.float()
-        targets = targets.long()
-        
-        logits = logits.detach().cpu()
-        targets = targets.detach().cpu()
+        logits, targets = logits[mask], targets[mask]
 
-        self.val_accuracy.update(logits, targets)
-        self.val_top5_acc.update(logits, targets)
-        self.val_f1.update(logits, targets)
+        self.val_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
+        self.val_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
+        self.val_f1.update(logits.detach().cpu(), targets.detach().cpu())
 
-        self.log("val/accuracy", self.val_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        self.log("val/top5_accuracy", self.val_top5_acc, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("val/f1_macro", self.val_f1, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
     def on_validation_epoch_end(self):
+        self.log("val/accuracy", self.val_accuracy.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("val/top5_accuracy", self.val_top5_acc.compute(), on_epoch=True, sync_dist=True)
+        self.log("val/f1_macro", self.val_f1.compute(), on_epoch=True, sync_dist=True)
+
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
         self.val_f1.reset()
     
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.config['training'].get('lr', 1e-5))
+        return torch.optim.Adam(
+            self.parameters(),
+            lr=self.hparams.config['training'].get('lr', 1e-5)
+        )
