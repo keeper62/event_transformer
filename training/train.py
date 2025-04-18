@@ -63,23 +63,23 @@ class TransformerLightning(pl.LightningModule):
         else:
             self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
         
-        num_classes = config['model']['vocab_size']
+        self.num_classes = config['model']['vocab_size']
 
         # Define metrics with persistent=False to avoid excessive memory usage
         self.train_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro')
+            task="multiclass", num_classes=self.num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro')
+            task="multiclass", num_classes=self.num_classes, average='micro')
         
         self.train_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5)
+            task="multiclass", num_classes=self.num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5)
+            task="multiclass", num_classes=self.num_classes, top_k=5)
         
         self.train_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro')
+            task="multiclass", num_classes=self.num_classes, average='macro')
         self.val_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro')
+            task="multiclass", num_classes=self.num_classes, average='macro')
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
@@ -103,23 +103,23 @@ class TransformerLightning(pl.LightningModule):
         self.train_accuracy = torchmetrics.classification.MulticlassAccuracy(
             num_classes=self.num_classes
         ).to(device)
-    
+
         self.train_top5_acc = torchmetrics.classification.MulticlassAccuracy(
             num_classes=self.num_classes, top_k=5
         ).to(device)
-    
+
         self.train_f1 = torchmetrics.classification.MulticlassF1Score(
             num_classes=self.num_classes, average="macro"
         ).to(device)
-    
+
         self.val_accuracy = torchmetrics.classification.MulticlassAccuracy(
             num_classes=self.num_classes
         ).to(device)
-    
+
         self.val_top5_acc = torchmetrics.classification.MulticlassAccuracy(
             num_classes=self.num_classes, top_k=5
         ).to(device)
-    
+
         self.val_f1 = torchmetrics.classification.MulticlassF1Score(
             num_classes=self.num_classes, average="macro"
         ).to(device)
