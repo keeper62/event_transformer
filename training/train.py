@@ -92,10 +92,6 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Mask out padding tokens (index 0)
-        mask = targets != 0
-        logits, targets = logits[mask], targets[mask]
-
         # Update metrics
         self.train_accuracy.update(logits, targets)
         self.train_top5_acc.update(logits, targets)
@@ -107,9 +103,9 @@ class TransformerLightning(pl.LightningModule):
 
     def on_train_epoch_end(self):
         # Compute and log metrics manually
-        self.log("train/accuracy", self.train_accuracy.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("train/accuracy", self.train_accuracy.compute(), on_epoch=True, sync_dist=True)
         self.log("train/top5_accuracy", self.train_top5_acc.compute(), on_epoch=True, sync_dist=True)
-        self.log("train/f1_micro", self.train_f1.compute(), on_epoch=True, sync_dist=True)
+        self.log("train/f1_micro", self.train_f1.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
 
         # Always reset!
         self.train_accuracy.reset()
@@ -121,10 +117,6 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
 
-        # Mask out padding
-        mask = targets != 0
-        logits, targets = logits[mask], targets[mask]
-
         self.val_accuracy.update(logits, targets)
         self.val_top5_acc.update(logits, targets)
         self.val_f1.update(logits, targets)
@@ -132,9 +124,9 @@ class TransformerLightning(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        self.log("val/accuracy", self.val_accuracy.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("val/accuracy", self.val_accuracy.compute(), on_epoch=True, sync_dist=True)
         self.log("val/top5_accuracy", self.val_top5_acc.compute(), on_epoch=True, sync_dist=True)
-        self.log("val/f1_micro", self.val_f1.compute(), on_epoch=True, sync_dist=True)
+        self.log("val/f1_micro", self.val_f1.compute(), on_epoch=True, sync_dist=True, prog_bar=True)
 
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
