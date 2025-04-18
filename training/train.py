@@ -105,9 +105,9 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         
         # Update metrics (operate on flattened outputs)
-        self.train_accuracy.update(logits, targets)
-        self.train_top5_acc.update(logits, targets)
-        self.train_f1.update(logits, targets)
+        self.train_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
+        self.train_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
+        self.train_f1.update(logits.detach().cpu(), targets.detach().cpu())
         
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/accuracy", self.train_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
@@ -126,9 +126,9 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
 
-        self.val_accuracy.update(logits, targets)
-        self.val_top5_acc.update(logits, targets)
-        self.val_f1.update(logits, targets)
+        self.val_accuracy.update(logits.detach().cpu(), targets.detach().cpu())
+        self.val_top5_acc.update(logits.detach().cpu(), targets.detach().cpu())
+        self.val_f1.update(logits.detach().cpu(), targets.detach().cpu())
 
         self.log("val/accuracy", self.val_accuracy, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
         self.log("val/top5_accuracy", self.val_top5_acc, on_step=False, on_epoch=True, sync_dist=True)
