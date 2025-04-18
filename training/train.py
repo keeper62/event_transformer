@@ -67,19 +67,19 @@ class TransformerLightning(pl.LightningModule):
 
         # Define metrics with persistent=False to avoid excessive memory usage
         self.train_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro')
+            task="multiclass", num_classes=num_classes, average='micro').to("cpu")
         self.val_accuracy = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, average='micro')
+            task="multiclass", num_classes=num_classes, average='micro').to("cpu")
         
         self.train_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5)
+            task="multiclass", num_classes=num_classes, top_k=5).to("cpu")
         self.val_top5_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes, top_k=5)
+            task="multiclass", num_classes=num_classes, top_k=5).to("cpu")
         
         self.train_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro')
+            task="multiclass", num_classes=num_classes, average='macro').to("cpu")
         self.val_f1 = torchmetrics.F1Score(
-            task="multiclass", num_classes=num_classes, average='macro')
+            task="multiclass", num_classes=num_classes, average='macro').to("cpu")
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
