@@ -124,9 +124,10 @@ class TransformerLightning(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        self.log("val/accuracy", self.val_accuracy.compute())
-        self.log("val/top5_accuracy", self.val_top5_acc.compute())
-        self.log("val/f1_micro", self.val_f1.compute(), prog_bar=True)
+        if self.trainer.is_global_zero:
+            self.log("val/accuracy", self.val_accuracy.compute())
+            self.log("val/top5_accuracy", self.val_top5_acc.compute())
+            self.log("val/f1_micro", self.val_f1.compute(), prog_bar=True)
 
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
