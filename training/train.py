@@ -61,16 +61,15 @@ class TransformerLightning(pl.LightningModule):
             self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
         else:
             self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
-            
+        
+        self.num_classes = config['model']['vocab_size']
+        
         # Define metrics — will move them to CPU later
         self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         
         self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
-        
-        
-        self.num_classes = config['model']['vocab_size']
 
 
     def forward(self, x, timestamps):
