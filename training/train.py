@@ -61,6 +61,14 @@ class TransformerLightning(pl.LightningModule):
             self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
         else:
             self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
+            
+        # Define metrics — will move them to CPU later
+        self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
+        self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
+        
+        self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
+        self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
+        
         
         self.num_classes = config['model']['vocab_size']
 
@@ -83,19 +91,39 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
+        # Update metrics
+        self.train_accuracy.update(logits, targets)
+        self.train_top5_acc.update(logits, targets)
 
         # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
+    def on_train_epoch_end(self):
+        # Compute and log metrics manually
+        self.log("train/accuracy", self.train_accuracy.compute())
+        self.log("train/top5_accuracy", self.train_top5_acc.compute())
+
+        # Always reset!
+        self.train_accuracy.reset()
+        self.train_top5_acc.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
+        
+        self.val_accuracy.update(logits, targets)
+        self.val_top5_acc.update(logits, targets)
 
         return loss
 
+    def on_validation_epoch_end(self):
+        self.log("val/accuracy", self.val_accuracy.compute())
+        self.log("val/top5_accuracy", self.val_top5_acc.compute())
+
+        self.val_accuracy.reset()
+        self.val_top5_acc.reset()
     
     def configure_optimizers(self):
         return torch.optim.Adam(
