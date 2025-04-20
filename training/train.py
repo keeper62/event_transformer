@@ -64,7 +64,6 @@ class TransformerLightning(pl.LightningModule):
         
         self.num_classes = config['model']['vocab_size']
         
-        # Define metrics — will move them to CPU later
         self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         
@@ -91,8 +90,10 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         
         # Update metrics
-        self.train_accuracy.update(logits, targets)
-        self.train_top5_acc.update(logits, targets)
+        #self.train_accuracy.update(logits, targets)
+        #self.train_top5_acc.update(logits, targets)
+        self.log("train/accuracy", self.train_accuracy(logits, targets), sync_dist=True)
+        self.log("train/top5_accuracy", self.train_top5_acc(logits, targets), sync_dist=True)
 
         # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -100,8 +101,8 @@ class TransformerLightning(pl.LightningModule):
 
     def on_train_epoch_end(self):
         # Compute and log metrics manually
-        self.log("train/accuracy", self.train_accuracy.compute(), sync_dist=True)
-        self.log("train/top5_accuracy", self.train_top5_acc.compute(), sync_dist=True)
+        #self.log("train/accuracy", self.train_accuracy.compute(), sync_dist=True)
+        #self.log("train/top5_accuracy", self.train_top5_acc.compute(), sync_dist=True)
 
         # Always reset!
         self.train_accuracy.reset()
@@ -112,14 +113,14 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        self.val_accuracy.update(logits, targets)
-        self.val_top5_acc.update(logits, targets)
+        self.log("val/accuracy", self.val_accuracy(logits, targets), sync_dist=True)
+        self.log("val/top5_accuracy", self.val_top5_acc(logits, targets), sync_dist=True)
 
         return loss
 
     def on_validation_epoch_end(self):
-        self.log("val/accuracy", self.val_accuracy.compute(), sync_dist=True)
-        self.log("val/top5_accuracy", self.val_top5_acc.compute(), sync_dist=True)
+        #self.log("val/accuracy", self.val_accuracy.compute(), sync_dist=True)
+        #self.log("val/top5_accuracy", self.val_top5_acc.compute(), sync_dist=True)
 
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
