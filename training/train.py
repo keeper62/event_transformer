@@ -113,6 +113,9 @@ class TransformerLightning(pl.LightningModule):
         # Always reset!
         self.train_accuracy.reset()
         self.train_top5_acc.reset()
+        self.train_recall.reset()
+        self.train_precision.reset()
+        self.train_f1.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -130,6 +133,9 @@ class TransformerLightning(pl.LightningModule):
     def on_validation_epoch_end(self):
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
+        self.val_recall.reset()
+        self.val_precision.reset()
+        self.val_f1.reset()
     
     def configure_optimizers(self):
         return torch.optim.Adam(
