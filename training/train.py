@@ -51,6 +51,10 @@ class DataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.config['training']['batch_size'], shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
+import pytorch_lightning as pl
+import torch
+import torchmetrics
+
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config, config_name, test_mode=False, class_weights=None):
         super().__init__()
@@ -66,20 +70,13 @@ class TransformerLightning(pl.LightningModule):
 
         self.num_classes = config['model']['vocab_size']
 
-        self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
-
-        self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
 
-        self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
-        self.val_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
-
-        self.train_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='macro')
-        self.val_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='macro')
-
-        self.train_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='macro')
-        self.val_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='macro')
+        # Binary metrics on correctness
+        self.val_f1 = torchmetrics.F1Score(task="binary")
+        self.val_precision = torchmetrics.Precision(task="binary")
+        self.val_recall = torchmetrics.Recall(task="binary")
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
@@ -98,25 +95,9 @@ class TransformerLightning(pl.LightningModule):
 
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        preds = torch.argmax(logits, dim=-1)
 
-        # Update metrics
-        self.log("train/accuracy", self.train_accuracy(logits, targets), sync_dist=True)
-        self.log("train/top5_accuracy", self.train_top5_acc(logits, targets), sync_dist=True)
-        self.log("train/f1", self.train_f1(preds, targets), sync_dist=True)
-        self.log("train/precision", self.train_precision(preds, targets), sync_dist=True)
-        self.log("train/recall", self.train_recall(preds, targets), sync_dist=True)
-
-        # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
-
-    def on_train_epoch_end(self):
-        self.train_accuracy.reset()
-        self.train_top5_acc.reset()
-        self.train_f1.reset()
-        self.train_precision.reset()
-        self.train_recall.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -124,15 +105,24 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         preds = torch.argmax(logits, dim=-1)
 
-        self.log("val/accuracy", self.val_accuracy(logits, targets), sync_dist=True)
-        self.log("val/top5_accuracy", self.val_top5_acc(logits, targets), sync_dist=True)
-        self.log("val/f1", self.val_f1(preds, targets), sync_dist=True)
-        self.log("val/precision", self.val_precision(preds, targets), sync_dist=True)
-        self.log("val/recall", self.val_recall(preds, targets), sync_dist=True)
+        correct = (preds == targets).long()
+        truth = torch.ones_like(correct)
+
+        self.val_accuracy.update(logits, targets)
+        self.val_top5_acc.update(logits, targets)
+        self.val_f1.update(correct, truth)
+        self.val_precision.update(correct, truth)
+        self.val_recall.update(correct, truth)
 
         return loss
 
     def on_validation_epoch_end(self):
+        self.log("val/accuracy", self.val_accuracy.compute(), sync_dist=True)
+        self.log("val/top5_accuracy", self.val_top5_acc.compute(), sync_dist=True)
+        self.log("val/f1", self.val_f1.compute(), sync_dist=True)
+        self.log("val/precision", self.val_precision.compute(), sync_dist=True)
+        self.log("val/recall", self.val_recall.compute(), sync_dist=True)
+
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
         self.val_f1.reset()
