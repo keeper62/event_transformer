@@ -45,20 +45,21 @@ def load_all_configs(config_dir: str = "configs") -> Dict[str, Dict[str, Any]]:
 
 def compute_class_weights(dataset: list[int], vocab_size: int) -> torch.Tensor:
     """
-    Compute normalized inverse frequency weights for a dataset.
+    Compute inverse frequency weights normalized so the maximum weight is 1.
 
     Args:
         dataset (list[int]): List of class indices.
-        vocab_size (int): Total number of classes in vocabulary.
+        vocab_size (int): Total number of classes.
 
     Returns:
-        torch.Tensor: Tensor of shape (vocab_size,) with weights normalized to [0, 1].
+        torch.Tensor: Weights tensor of shape (vocab_size,), scaled to [0, 1].
     """
     counter = Counter(dataset)
-    weights = torch.zeros(vocab_size, dtype=torch.float32)
     total_count = sum(counter.values())
+    weights = torch.zeros(vocab_size, dtype=torch.float32)
 
     for class_idx in range(vocab_size):
-        weights[class_idx] = total_count / (counter[class_idx] + 1e-6)
+        class_count = counter.get(class_idx, 0)
+        weights[class_idx] = total_count / (class_count + 1e-6)
 
     return weights / weights.max()

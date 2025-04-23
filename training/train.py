@@ -58,20 +58,28 @@ class TransformerLightning(pl.LightningModule):
         self.model = Transformer(config)
         self.config_name = config_name
         self.test_mode = test_mode
-        
+
         if class_weights is not None:
             self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
         else:
             self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=0)
-        
+
         self.num_classes = config['model']['vocab_size']
-        
+
         self.train_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
         self.val_accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, average='micro')
-        
+
         self.train_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
         self.val_top5_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
-    
+
+        self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
+        self.val_f1 = torchmetrics.F1Score(task="multiclass", num_classes=self.num_classes, average='macro')
+
+        self.train_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='macro')
+        self.val_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='macro')
+
+        self.train_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='macro')
+        self.val_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='macro')
 
     def forward(self, x, timestamps):
         return self.model(x, timestamps)
@@ -83,29 +91,6 @@ class TransformerLightning(pl.LightningModule):
             outputs.view(-1, outputs.size(-1)),  # [B*T, C]
             targets.view(-1)                     # [B*T]
         )
-        
-    def _compute_bleu_rouge(self, preds, targets):
-        preds = preds.cpu().tolist()
-        targets = targets.cpu().tolist()
-
-        smooth = SmoothingFunction().method1
-        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-
-        bleu_scores = []
-        rouge_scores = []
-
-        for p, t in zip(preds, targets):
-            # skip ignored tokens
-            if t == 0:
-                continue
-
-            bleu = sentence_bleu([[t]], [p], smoothing_function=smooth)
-            rouge = scorer.score(str(t), str(p))['rougeL'].fmeasure
-
-            bleu_scores.append(bleu)
-            rouge_scores.append(rouge)
-
-        return sum(bleu_scores) / len(bleu_scores), sum(rouge_scores) / len(rouge_scores)
 
     def training_step(self, batch, batch_idx):
         if self.test_mode and batch_idx > 5:
@@ -113,46 +98,47 @@ class TransformerLightning(pl.LightningModule):
 
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
+        preds = torch.argmax(logits, dim=-1)
+
         # Update metrics
         self.log("train/accuracy", self.train_accuracy(logits, targets), sync_dist=True)
         self.log("train/top5_accuracy", self.train_top5_acc(logits, targets), sync_dist=True)
-        
-        preds = torch.argmax(logits, dim=-1)
-        
-        bleu, rouge = self._compute_bleu_rouge(preds, targets)
-        self.log("train/bleu", bleu, sync_dist=True)
-        self.log("train/rougeL", rouge, sync_dist=True)
+        self.log("train/f1", self.train_f1(preds, targets), sync_dist=True)
+        self.log("train/precision", self.train_precision(preds, targets), sync_dist=True)
+        self.log("train/recall", self.train_recall(preds, targets), sync_dist=True)
 
         # Log loss only
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def on_train_epoch_end(self):
-        # Always reset!
         self.train_accuracy.reset()
         self.train_top5_acc.reset()
+        self.train_f1.reset()
+        self.train_precision.reset()
+        self.train_recall.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
+        preds = torch.argmax(logits, dim=-1)
+
         self.log("val/accuracy", self.val_accuracy(logits, targets), sync_dist=True)
         self.log("val/top5_accuracy", self.val_top5_acc(logits, targets), sync_dist=True)
-        
-        preds = torch.argmax(logits, dim=-1)
-        
-        bleu, rouge = self._compute_bleu_rouge(preds, targets)
-        self.log("val/bleu", bleu, sync_dist=True)
-        self.log("val/rougeL", rouge, sync_dist=True)
+        self.log("val/f1", self.val_f1(preds, targets), sync_dist=True)
+        self.log("val/precision", self.val_precision(preds, targets), sync_dist=True)
+        self.log("val/recall", self.val_recall(preds, targets), sync_dist=True)
 
         return loss
 
     def on_validation_epoch_end(self):
         self.val_accuracy.reset()
         self.val_top5_acc.reset()
-    
+        self.val_f1.reset()
+        self.val_precision.reset()
+        self.val_recall.reset()
+
     def configure_optimizers(self):
         return torch.optim.Adam(
             self.parameters(),

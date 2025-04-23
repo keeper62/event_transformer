@@ -44,7 +44,7 @@ class Transformer(nn.Module):
         logits = self.fc_out(x)
         return logits
 
-    def predict(self, x: torch.Tensor, timestamps: torch.Tensor) -> list[int]:
+    def predict(self, x: torch.Tensor, timestamps: torch.Tensor|None = None) -> list[int]:
         """
         Predict method for autoregressive decoding or classification.
 
@@ -59,9 +59,10 @@ class Transformer(nn.Module):
             x = x.unsqueeze(0)  # (1, seq_len)
 
         # Dummy timestamps for inference if not provided
-        timestamps = torch.zeros_like(x, dtype=torch.float32)
+        if timestamps == None:
+            timestamps = torch.zeros_like(x, dtype=torch.float32)
 
-        logits = self.forward(x, timestamps)
+        logits = self.forward(x, timestamps)[:, -1, :]
 
         # Remove batch dimension if single sequence
         if logits.shape[0] == 1:
