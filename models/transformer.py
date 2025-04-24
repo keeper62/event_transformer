@@ -25,22 +25,10 @@ class Transformer(nn.Module):
         
         self.fc_out: nn.Linear = nn.Linear(model_cfg["embed_dim"], self.out_features)
 
-    def forward(self, x: torch.Tensor, timestamps: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the Transformer model.
-
-        Args:
-            x (torch.Tensor): Token indices of shape (batch_size, seq_len)
-            timestamps (torch.Tensor): Timestamps for positional encoding
-
-        Returns:
-            torch.Tensor: Logits of shape (batch_size, seq_len, vocab_size)
-        """
+    def forward(self, x: torch.Tensor, timestamps: torch.Tensor = None) -> torch.Tensor:
         x = self.embedding_layer(x, timestamps)
-
         for layer in self.decoder_layers:
-            x = layer(x)
-
+            x = layer(x, timestamps=timestamps)
         logits = self.fc_out(x)
         return logits
 

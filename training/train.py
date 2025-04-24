@@ -78,7 +78,7 @@ class TransformerLightning(pl.LightningModule):
         self.val_precision = torchmetrics.Precision(task="binary")
         self.val_recall = torchmetrics.Recall(task="binary")
 
-    def forward(self, x, timestamps):
+    def forward(self, x, timestamps=None):
         return self.model(x, timestamps)
 
     def _process_batch(self, batch):

@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import math
+import numpy as np
 
 class AbsolutePosition(nn.Module):
     def __init__(self, d_model, max_len=512):
@@ -83,32 +84,52 @@ class LearnableRelativePosition(nn.Module):
 
         return relative_embeddings
 
-class UnixTimeDeltaPosition(nn.Module):
-    def __init__(self, d_model, max_len=512):
-        super().__init__()
-        self.embedding = nn.Linear(1, d_model)  # Projects deltas to d_model
-
-    def forward(self, unix_timestamps):
+class TimeAwareRelativePosition(nn.Module):
+    def __init__(self, max_len: int, head_dim: int):
         """
+        Time-aware sinusoidal relative position encoding based on time deltas.
+
         Args:
-            unix_timestamps: [batch_size, seq_len]
-        Returns:
-            time_embeddings: [batch_size, seq_len, d_model]
+            max_len (int): Maximum sequence length (used for safety, not strictly needed).
+            head_dim (int): Dimension of the attention head.
         """
-        # Normalize each sequence to start at t=0
-        timestamps = unix_timestamps - unix_timestamps[:, :1]  # [batch_size, seq_len]
+        super().__init__()
+        self.max_len = max_len
+        self.head_dim = head_dim
 
-        # Compute deltas (diff between consecutive timestamps)
-        deltas = torch.zeros_like(timestamps)
-        deltas[:, 1:] = timestamps[:, 1:] - timestamps[:, :-1]  # [batch_size, seq_len]
+        assert head_dim % 2 == 0, "head_dim must be even for sinusoidal encoding."
 
-        # Log-scale deltas (add 1 to avoid log(0))
-        deltas = torch.log1p(deltas).unsqueeze(-1)  # [batch_size, seq_len, 1]
-        
-        # Normalize to [0, 1] range per sequence
-        min_vals = deltas.min(dim=1, keepdim=True).values
-        max_vals = deltas.max(dim=1, keepdim=True).values
-        norm_deltas = (deltas - min_vals) / (max_vals - min_vals + 1e-8)  # Add epsilon to avoid divide-by-zero
+        # Projection vector to reduce sinusoidal encoding to scalar bias
+        self.w = nn.Parameter(torch.randn(head_dim))
 
-        # Project to embedding space
-        return self.embedding(norm_deltas)  # [batch_size, seq_len, d_model]
+    def forward(self, timestamps: torch.Tensor) -> torch.Tensor:
+        """
+        Compute time-aware relative position bias matrix.
+
+        Args:
+            timestamps (torch.Tensor): Tensor of shape (seq_len,) with absolute time values (e.g., in seconds).
+
+        Returns:
+            torch.Tensor: Bias matrix of shape (seq_len, seq_len) to be added to attention logits.
+        """
+        seq_len = timestamps.shape[0]
+        device = timestamps.device
+
+        # Compute absolute time difference matrix
+        delta_t = torch.abs(timestamps[:, None] - timestamps[None, :])  # shape (seq_len, seq_len)
+
+        # Sinusoidal encoding
+        d_t = self.head_dim
+        enc = torch.zeros((seq_len, seq_len, d_t), device=device)
+        position = delta_t.unsqueeze(-1)  # shape (seq_len, seq_len, 1)
+
+        div_term = torch.exp(
+            torch.arange(0, d_t, 2, device=device).float() * (-math.log(10000.0) / d_t)
+        )
+        enc[..., 0::2] = torch.sin(position * div_term)
+        enc[..., 1::2] = torch.cos(position * div_term)
+
+        # Project to scalar biases
+        bias = torch.einsum("ijh,h->ij", enc, self.w)  # shape (seq_len, seq_len)
+
+        return bias

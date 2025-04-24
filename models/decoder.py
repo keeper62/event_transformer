@@ -28,21 +28,13 @@ class TransformerDecoderLayer(nn.Module):
         self.norm2: nn.LayerNorm = nn.LayerNorm(embed_dim)
         self.norm3: nn.LayerNorm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for TransformerDecoderLayer.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim)
-
-        Returns:
-            torch.Tensor: Output tensor of the same shape
-        """
-        attn_out_masked = self.attn_masked(x, mask=True)
+    def forward(self, x: torch.Tensor, timestamps: torch.Tensor = None) -> torch.Tensor:
+        attn_out_masked = self.attn_masked(x, timestamps=timestamps, mask=True)
         x = self.norm1(x + attn_out_masked)
-        
-        attn_out = self.attn(x)
+    
+        attn_out = self.attn(x, timestamps=timestamps)
         x = self.norm2(x + attn_out)
-        
+    
         ffn_out = self.ffn(x)
         return self.norm3(x + ffn_out)
+

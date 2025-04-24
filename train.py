@@ -18,7 +18,7 @@ def train_with_config(config, config_name, num_accelerators, num_nodes, accelera
         devices=num_accelerators, 
         accelerator=accelerator, 
         num_nodes=num_nodes, 
-        strategy='ddp',  # PyTorch Lightning automatically handles DDP
+        strategy='ddp_find_unused_parameters_true',  # PyTorch Lightning automatically handles DDP
         logger=not test_mode,
         gradient_clip_val=1.0,  # Gradient clipping
         deterministic=True,  # For reproducibility
