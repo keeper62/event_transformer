@@ -1,9 +1,9 @@
-import torch
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+import os
 from drain3 import TemplateMiner
 from drain3.file_persistence import FilePersistence
-from transformers import AutoTokenizer
 
-class LogTokenizer:
+class LogTemplateMiner:
     def __init__(self, state_path):
         """
         Initializes the tokenizer using Drain3 for log messages.
@@ -49,3 +49,42 @@ class LogTokenizer:
     def save_state(self):
         """ Saves the current state of the tokenizer. """
         self.template_miner.save_state("For re-use")
+
+class LogTokenizer:
+    def __init__(self, tokenizer_path=None, vocab_size=30522):
+        """
+        Initializes the tokenizer. If a path is provided, it loads an existing tokenizer.
+        Otherwise, it creates a new tokenizer.
+        """
+        if tokenizer_path and os.path.exists(tokenizer_path):
+            self.tokenizer = Tokenizer.from_file(tokenizer_path)
+        else:
+            # Start a new WordLevel tokenizer
+            self.tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
+            self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            self.vocab_size = vocab_size
+
+    def train(self, texts):
+        """Trains the tokenizer on a list of texts."""
+        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["<UNK>"])
+        self.tokenizer.train_from_iterator(texts, trainer)
+
+    def transform(self, text):
+        """Tokenizes and encodes the text into token IDs."""
+        return self.tokenizer.encode(text).ids
+
+    def decode(self, ids):
+        """Decodes a sequence of token IDs back into text."""
+        return self.tokenizer.decode(ids)
+
+    def get_vocab_size(self):
+        """Returns the vocabulary size."""
+        return len(self.tokenizer.get_vocab())
+
+    def get_vocab(self):
+        """Returns the vocabulary dictionary."""
+        return self.tokenizer.get_vocab()
+
+    def save(self, path):
+        """Saves the tokenizer to a file."""
+        self.tokenizer.save(path)

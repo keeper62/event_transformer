@@ -1,4 +1,4 @@
-from models import Transformer, LogTokenizer, load_config
+from models import Transformer, LogTemplateMiner, load_config
 from dataset_class.bgl_dataset import Dataset
 import torch
 
@@ -6,7 +6,7 @@ def main():
     # Load Transformer model
     config = load_config("configs/base_config.yaml")['base_config']
     
-    tokenizer = LogTokenizer("drain3_state.bin")
+    tokenizer = LogTemplateMiner("drain3_state.bin")
     tokenizer.load_state()
     
     config['model']['vocab_size'] = tokenizer.get_vocab_size()

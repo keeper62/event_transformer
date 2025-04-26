@@ -22,9 +22,9 @@ base_config:
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
-        rpe_class: False # Either False or String
+        rpe_class: "TimeAwareRelativePosition" # Either False or String
     ape:
-        ape_class: "UnixTimeDeltaPosition" # Either False or String
+        ape_class: "AbsolutePosition" # Either False or String
 
     # Encoder Settings (Defined in event_transformer/models/decoder.py)
     decoder:

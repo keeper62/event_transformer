@@ -3,9 +3,10 @@ import torch
 from torch.utils.data import Dataset
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, prediction_steps, context_length, transform=None, test_mode=False): #time window in seconds
+    def __init__(self, path, prediction_steps, context_length, transform=None, tokenizer=None, test_mode=False): 
         self.path = path
         self.transform = transform
+        self.tokenizer = tokenizer
         self.prediction_steps = prediction_steps
         self.context_length = context_length
         self.test_mode = test_mode
@@ -33,7 +34,7 @@ class AbstractBGLDataset(Dataset, ABC):
         pass
 
     def __len__(self):
-        return max(0, self.num_lines - self.context_length - self.prediction_steps + 1)
+        return max(0, self.num_lines - self.context_length - self.prediction_steps)
 
     def __getitem__(self, idx):
         input_window = self.tokens[idx: idx + self.context_length]

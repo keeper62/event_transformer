@@ -1,17 +1,16 @@
 import torchmetrics
 import importlib
-from models import Transformer, LogTokenizer, compute_class_weights
+from models import Transformer, LogTemplateMiner, LogTokenizer, compute_class_weights
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from rouge_score import rouge_scorer
 
 class DataModule(pl.LightningDataModule):
     def __init__(self, config, test_mode=False):
         super().__init__()
         self.config = config
-        self.tokenizer = LogTokenizer(config['dataset']['drain_path'])
+        self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
+        self.tokenizer = LogTokenizer(config['dataset']['vocab_path'])
         self.test_mode = test_mode
         
         dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
@@ -19,6 +18,8 @@ class DataModule(pl.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.setup_f = False
+        
+        self.template_miner.load_state()
 
     def setup(self, stage=None):
         if not self.setup_f:
@@ -26,11 +27,10 @@ class DataModule(pl.LightningDataModule):
                 path=self.config['dataset']['path'], 
                 prediction_steps=self.config['model']['prediction_steps'],
                 context_length=self.config['model']['context_length'],
-                transform=self.tokenizer.transform, 
+                transform=self.template_miner.transform, 
+                tokenizer=self.tokenizer,
                 test_mode=self.test_mode
             )
-
-            self.tokenizer.load_state()
 
             train_size = int(0.8 * len(dataset))
             val_size = len(dataset) - train_size
@@ -56,12 +56,11 @@ import torch
 import torchmetrics
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config, config_name, test_mode=False, class_weights=None):
+    def __init__(self, config, config_name, class_weights=None):
         super().__init__()
         self.save_hyperparameters()
         self.model = Transformer(config)
         self.config_name = config_name
-        self.test_mode = test_mode
 
         if class_weights is not None:
             self.loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1, ignore_index=0)
@@ -90,9 +89,6 @@ class TransformerLightning(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        if self.test_mode and batch_idx > 5:
-            return None
-
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
 

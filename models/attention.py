@@ -62,8 +62,8 @@ class MultiHeadAttention(BaseAttention):
 
 
 class MultiHeadDenseCollaboration(BaseAttention):
-    def __init__(self, config, timestamps):
-        super().__init__(config, timestamps)
+    def __init__(self, config):
+        super().__init__(config)
         self.conv1 = nn.Conv1d(in_channels=self.heads, out_channels=self.heads, kernel_size=1, groups=self.heads)
         self.conv2 = nn.Conv1d(in_channels=self.heads, out_channels=self.heads, kernel_size=1, groups=self.heads)
 
@@ -74,8 +74,8 @@ class MultiHeadDenseCollaboration(BaseAttention):
 
 # https://arxiv.org/pdf/2006.16362
 class CollaborativeAttention(BaseAttention):
-    def __init__(self, config, timestamps):
-        super().__init__(config, timestamps)
+    def __init__(self, config):
+        super().__init__(config)
         self.mixing = self.init_mixing_matrix()
         self.content_bias = nn.Linear(self.dim, self.heads, bias=False)
 
@@ -91,9 +91,9 @@ class CollaborativeAttention(BaseAttention):
     def apply_attention(self, q, k, v, timestamps=None, mask=True):
         mixed_query = q * self.mixing.view(self.heads, 1, -1)
         attn_scores = torch.matmul(mixed_query, k.transpose(-2, -1)) * self.scale
-    
+
         k_reshaped = k.permute(0, 2, 1, 3).reshape(k.shape[0], k.shape[2], -1)
         content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)
         attn_scores += content_bias
-    
+
         return self.final_attention(attn_scores, v, timestamps, mask, q.shape[2])
