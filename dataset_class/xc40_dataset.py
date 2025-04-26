@@ -11,7 +11,6 @@ class Dataset(AbstractBGLDataset):
 
         # Process console logs
         for file_path in (base_path / "console").glob("*"):
-            print(file_path)
             with file_path.open(errors='replace' ) as f:
                 for line in f:
                     parsed = self.parse_console_log(line.strip())
@@ -23,7 +22,6 @@ class Dataset(AbstractBGLDataset):
 
         # Process message logs
         for file_path in (base_path / "message").glob("*"):
-            print(file_path)
             with file_path.open(errors='replace') as f:
                 for line in f:
                     parsed = self.parse_message_log(line.strip())

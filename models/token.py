@@ -27,7 +27,7 @@ class LogTemplateMiner:
             
     def get_event_id(self, log_message):
         """ Retrieves the event ID for a given log message. """
-        result = self.template_miner.match(log_message)
+        result = self.template_miner.match(log_message, 'fallback')
         return result.cluster_id
 
     def get_vocab_size(self):
