@@ -10,15 +10,16 @@ base_config:
         ffn_dim: 2048
         num_windows: 30  # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 1024  # The # steps in the past as input
-        prediction_steps: 128  # The # steps in the future to predict
+        context_length: 64  # The # steps in the past as input
+        prediction_steps: 16  # The # steps in the future to predict
         num_groups: 8
         dropout: 0.1
 
     # Training Parameters
     training:
         num_epochs: 10
-        batch_size: 600
+        batch_size: 64
+
 
     # Positional Encoding (Defined in event_transformer/models/position.py)
     rpe:
