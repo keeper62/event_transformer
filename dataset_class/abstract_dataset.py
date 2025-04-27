@@ -16,12 +16,10 @@ class AbstractBGLDataset(Dataset, ABC):
         else:
             self.data = self._read_data(path)
         
-        self.data = [(self.transform(d), t) for d, t in self.data]
+        self.data = [self.transform(d) for d in self.data]
 
         # Unpack and store tensors separately for speed
-        data, timestamps = zip(*self.data)
-        self.tokens = torch.tensor(data, dtype=torch.long)
-        self.timestamps = torch.tensor(timestamps, dtype=torch.float32)
+        self.tokens = torch.tensor(self.data, dtype=torch.long)
         
         self.num_lines = len(self.tokens)
 
@@ -38,10 +36,7 @@ class AbstractBGLDataset(Dataset, ABC):
 
     def __getitem__(self, idx):
         input_window = self.tokens[idx: idx + self.context_length]
-        output = self.tokens[idx + self.context_length + 1]
-        output_window = torch.cat((input_window[1:], output.unsqueeze(0)))
+        output_window = self.tokens[idx + self.context_length: idx + self.context_length + self.prediction_steps]
 
-        input_timestamps = self.timestamps[idx: idx + self.context_length]
-
-        return input_window, output_window, input_timestamps
+        return input_window, output_window
 

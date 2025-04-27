@@ -5,8 +5,7 @@ class Dataset(AbstractBGLDataset):
         with open(path, "r", encoding="utf8") as f:
             raw = [line.split(maxsplit=9) for line in f]
             data = [r[-1] for r in raw]
-            timestamps = [int(r[1]) for r in raw]
-        return list(zip(data, timestamps))
+        return list(data)
 
     def _read_data_training(self, path):
         data = []
@@ -15,5 +14,5 @@ class Dataset(AbstractBGLDataset):
                 if i >= 1000:
                     break
                 parts = line.split(maxsplit=9)
-                data.append((parts[-1], int(parts[1])))
+                data.append(parts[-1])
         return data

@@ -77,17 +77,29 @@ class TransformerLightning(pl.LightningModule):
         self.val_precision = torchmetrics.Precision(task="binary")
         self.val_recall = torchmetrics.Recall(task="binary")
 
-    def forward(self, x, timestamps=None):
-        return self.model(x, timestamps)
+    def forward(self, x):
+        return self.model(x)
 
     def _process_batch(self, batch):
-        inputs, targets, timestamps = batch
-        outputs = self(inputs, timestamps)
-        return (
-            outputs.view(-1, outputs.size(-1)),  # [B*T, C]
-            targets.view(-1)                     # [B*T]
-        )
+        inputs, targets = batch  # inputs: [batch, seq_len]
 
+        outputs = []
+
+        for step in range(self.model.n_steps):
+            logits = self(inputs)  # [batch, seq_len, vocab_size]
+            logits_last = logits[:, -1, :]  # [batch, vocab_size]
+
+            preds = logits_last.argmax(dim=-1)  # [batch]
+
+            outputs.append(logits_last)  # Save logits
+
+            # Shift input: remove first token, append prediction
+            inputs = torch.cat([inputs[:, 1:], preds.unsqueeze(1)], dim=1)  # [batch, seq_len]
+
+        outputs = torch.stack(outputs, dim=1)  # [batch, n_steps, vocab_size]
+
+        return outputs.view(-1, outputs.size(-1)), targets.view(-1)
+        
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)

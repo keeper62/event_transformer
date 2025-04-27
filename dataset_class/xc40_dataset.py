@@ -39,17 +39,9 @@ class Dataset(AbstractBGLDataset):
         if len(parts) < 3:
             return None
 
-        timestamp_str, hostname, message = parts
+        _, hostname, message = parts
 
-        # Parse timestamp into Unix time
-        try:
-            dt = datetime.fromisoformat(timestamp_str)
-        except ValueError:
-            return None
-
-        unix_timestamp = dt.timestamp()
-
-        return hostname, unix_timestamp, message
+        return hostname, message
 
     def parse_message_log(self, line: str) -> dict:
         parts = line.strip().split(' ', 6)  # Priority, Version, Timestamp, Host, Service, Rest
@@ -57,20 +49,15 @@ class Dataset(AbstractBGLDataset):
         if len(parts) < 6:
             raise ValueError(f"Invalid message log format: {line}")
 
-        timestamp_str = parts[1]
         hostname = parts[2]
         message = parts[6]
 
-        # Parse timestamp into Unix time
-        dt = datetime.fromisoformat(timestamp_str)
-        unix_timestamp = dt.timestamp()
-
-        return hostname, unix_timestamp, message
+        return hostname, message
     
     def combine_and_sort_logs(self, console_logs, message_logs):
         all_logs = console_logs + message_logs
         # Sort by timestamp (index 1)
         all_logs_sorted = sorted(all_logs, key=lambda x: x[1])
         # Drop hostname, only keep (timestamp, message)
-        stripped_logs = [(message, timestamp) for _, timestamp, message in all_logs_sorted]
+        stripped_logs = [message for _, message in all_logs_sorted]
         return stripped_logs
