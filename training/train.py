@@ -82,22 +82,23 @@ class TransformerLightning(pl.LightningModule):
 
     def _process_batch(self, batch):
         inputs, targets = batch  # inputs: [batch, seq_len]
-
-        outputs = []
-
+    
+        batch_size = inputs.size(0)
+        outputs = torch.zeros(batch_size, self.model.n_steps, self.model.out_features, device=inputs.device)
+    
         for step in range(self.model.n_steps):
             logits = self(inputs)  # [batch, seq_len, vocab_size]
             logits_last = logits[:, -1, :]  # [batch, vocab_size]
-
+    
             preds = logits_last.argmax(dim=-1)  # [batch]
-
-            outputs.append(logits_last)  # Save logits
-
-            # Shift input: remove first token, append prediction
+    
+            outputs[:, step, :] = logits_last  # Save only the last step
+    
             inputs = torch.cat([inputs[:, 1:], preds.unsqueeze(1)], dim=1)  # [batch, seq_len]
-
-        outputs = torch.stack(outputs, dim=1)  # [batch, n_steps, vocab_size]
-
+    
+            del logits  # Free memory
+            torch.cuda.empty_cache()
+    
         return outputs.view(-1, outputs.size(-1)), targets.view(-1)
         
     def training_step(self, batch, batch_idx):
