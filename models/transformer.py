@@ -1,59 +1,117 @@
 import torch
 import torch.nn as nn
 import importlib
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from .embeddings import Embeddings
 
 class Transformer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
-        
         model_cfg = config['model']
+        
+        # Configuration
         self.out_features: int = model_cfg['vocab_size']
         self.n_steps: int = model_cfg['prediction_steps']
+        self.embed_dim: int = model_cfg['embed_dim']
+        self.num_layers: int = model_cfg['num_layers']
         
-        # Embedding layer
-        self.embedding_layer: nn.Module = Embeddings(config)
+        # Embedding layer with gradient checkpointing option
+        self.embedding_layer = Embeddings(config)
         
-        # Dynamically load decoder layer class
+        # Dynamic decoder layer loading with cache
         decoder_module = importlib.import_module("models.decoder")
         decoder_class = getattr(decoder_module, "TransformerDecoderLayer")
         
-        self.decoder_layers: nn.ModuleList = nn.ModuleList([
-            decoder_class(config) for _ in range(model_cfg["num_layers"])
+        # Create decoder layers with optional gradient checkpointing
+        self.decoder_layers = nn.ModuleList([
+            self._create_decoder_layer(decoder_class, config, i)
+            for i in range(self.num_layers)
         ])
         
-        self.fc_out: nn.Linear = nn.Linear(model_cfg["embed_dim"], self.out_features)
+        # Final output layer with weight tying option
+        self.fc_out = nn.Linear(self.embed_dim, self.out_features)
+        if config['training'].get('tie_weights', False):
+            self._tie_weights()
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+        
+        # Mixed precision helpers
+        self._autocast_kwargs = {
+            'device_type': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'enabled': config['training'].get('mixed_precision', True)
+        }
 
-    def forward(self, x: torch.Tensor, timestamps: torch.Tensor = None) -> torch.Tensor:
-        x = self.embedding_layer(x, timestamps)
-        for layer in self.decoder_layers:
-            x = layer(x, timestamps=timestamps)
-        logits = self.fc_out(x)
-        return logits
+    def _create_decoder_layer(self, decoder_class, config: Dict[str, Any], layer_idx: int) -> nn.Module:
+        """Create a decoder layer with optional gradient checkpointing."""
+        layer = decoder_class(config)
+        
+        # Enable gradient checkpointing for middle layers to save memory
+        if config['training'].get('gradient_checkpointing', False) and 0 < layer_idx < self.num_layers - 1:
+            layer = torch.utils.checkpoint.checkpoint_wrapper(layer)
+            
+        return layer
 
-    def predict(self, x: torch.Tensor, timestamps: torch.Tensor|None = None) -> list[int]:
+    def _tie_weights(self) -> None:
+        """Tie input and output embeddings weights if they have same dimension."""
+        if hasattr(self.embedding_layer, 'token_embedding'):
+            self.fc_out.weight = self.embedding_layer.token_embedding.weight
+            print("Weight tying applied between embedding and output layers")
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize weights for different layer types."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0, std=self.embed_dim ** -0.5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with optional mixed precision."""
+        with torch.amp.autocast(**self._autocast_kwargs):
+            x = self.embedding_layer(x)
+            
+            # Process through decoder layers
+            for layer in self.decoder_layers:
+                x = layer(x)
+                
+            return self.fc_out(x)
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None) -> List[int]:
         """
-        Predict method for autoregressive decoding or classification.
-
+        Efficient prediction method with sampling options.
+        
         Args:
-            x (torch.Tensor): Input token indices of shape (seq_len,) or (batch_size, seq_len)
-
+            x: Input token indices of shape (seq_len,) or (batch_size, seq_len)
+            temperature: Softmax temperature (1.0 = normal, <1.0 = more conservative)
+            top_k: If set, only sample from top k most likely tokens
+            
         Returns:
-            list[int]: Predicted class indices
+            List of predicted class indices
         """
-        # Handle single-sequence input
-        if x.dim() == 1:
-            x = x.unsqueeze(0)  # (1, seq_len)
+        # Handle input shapes
+        was_1d = x.dim() == 1
+        if was_1d:
+            x = x.unsqueeze(0)
+            
+        # Get logits for last position only
+        logits = self.forward(x)[:, -1, :] / temperature
+        
+        # Apply top-k filtering if specified
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+            
+        # Sample from distribution
+        probs = torch.softmax(logits, dim=-1)
+        preds = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        
+        # Convert to list and remove batch dim if needed
+        result = preds.tolist()
+        return result[0] if was_1d else result
 
-        # Dummy timestamps for inference if not provided
-        if timestamps == None:
-            timestamps = torch.zeros_like(x, dtype=torch.float32)
-
-        logits = self.forward(x, timestamps)[:, -1, :]
-
-        # Remove batch dimension if single sequence
-        if logits.shape[0] == 1:
-            logits = logits.squeeze(0)  # (seq_len, vocab_size)
-
-        return logits.argmax(dim=-1).tolist()
+    def get_num_params(self) -> int:
+        """Return the total number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

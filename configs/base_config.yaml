@@ -1,5 +1,7 @@
 base_config:
-    device: "cpu"
+    # Environment settings
+    device: "auto"  # Can be "auto", "cpu", "cuda", etc.
+    seed: 42        # Random seed for reproducibility
 
     # Model Hyperparameters
     model:
@@ -8,33 +10,89 @@ base_config:
         num_heads: 8
         num_layers: 6
         ffn_dim: 2048
-        num_windows: 30  # Sliding window size for multi-head attention
+        num_windows: 30          # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 100  # The # steps in the past as input
-        prediction_steps: 5  # The # steps in the future to predict
+        context_length: 100      # The # steps in the past as input
+        prediction_steps: 5      # The # steps in the future to predict
         num_groups: 8
         dropout: 0.1
-        meaning_vocab_size: 1825  # Vocabulary size for the meaning embedding
+        meaning_vocab_size: 1825 # Vocabulary size for the meaning embedding
+        activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
     # Training Parameters
     training:
         num_epochs: 2
         batch_size: 10
+        learning_rate: 0.001
+        weight_decay: 0.01       # L2 regularization
+        gradient_clip_val: 1.0   # Gradient clipping value
+        log_interval: 50         # Log every N steps
+        overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
+        
+        # FeedForward Network specific
+        ffn_pre_norm: true       # Whether to use LayerNorm before FFN
+        residual_scaling: 1.0    # Scale factor for residual connections
+        
+        # Checkpointing
+        save_top_k: 3           # Save top k checkpoints
+        monitor: "val_loss"     # Metric to monitor for checkpointing
+        
+        # Early stopping (optional)
+        early_stopping:
+            enabled: false       # Set to true to enable early stopping
+            patience: 5          # Number of epochs to wait before stopping
+            min_delta: 0.001     # Minimum change to qualify as improvement
+        
+        # Optimization
+        optimizer: "adamw"       # adam, adamw, sgd, etc.
+        scheduler: "reduce_on_plateau"  # Optional: reduce_on_plateau, cosine, etc.
+        scheduler_params:
+            factor: 0.1
+            patience: 3
+            mode: "min"
 
-    # Positional Encoding (Defined in event_transformer/models/position.py)
-    rpe:
-        rpe_class: "LearnableRelativePosition" # Either False or String
-    ape:
-        ape_class: "LearnableAbsolutePosition" # Either False or String
+    # Attention Parameters
+    attention:
+        qkv_bias: false          # Whether to use bias in QKV projections
+        out_bias: true           # Whether to use bias in output projection
+        memory_efficient: true   # Use memory-efficient attention
+        chunk_size: 256          # Sequence chunk size for memory efficiency
+        inter_head_dim: 64       # Intermediate dimension for head collaboration
+        attention_dropout: 0.1   # Dropout for attention weights
 
-    # Encoder Settings (Defined in event_transformer/models/decoder.py)
+    # Positional Encoding
+    position:
+        ape_class: "PositionalEncoding"  # Options: PositionalEncoding, LearnableAbsolutePosition
+        max_len: 512
+        dropout: 0.1
+
+    # Decoder Settings
     decoder:
-        decoder_class: "MultiHeadAttention"  # Specify decoder class
+        decoder_class: "MultiHeadAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
+        share_attention_weights: false       # Whether to share weights between attention layers
+        gradient_checkpointing: false        # Enable memory-efficient training
 
     # Dataset Settings
     dataset:
         name: "xc40"
         path: "data/xc40/"
-        class: "xc40_dataset" # Make sure to use the correct file name for your dataset without .py extension
+        class: "xc40_dataset"     # Dataset class name
         drain_path: "drain3_state_xc40.bin"
         vocab_path: "tokenizer_state_xc40.txt"
+        num_workers: 4            # DataLoader workers
+        pin_memory: true          # Enable for GPU training
+        persistent_workers: true  # Maintain workers between epochs
+        shuffle: true             # Whether to shuffle training data
+
+    # Logging
+    logging:
+        log_dir: "logs/"          # Directory for TensorBoard logs
+        experiment_name: "xc40_experiment"
+        version: "version_0"      # Optional version tag
+        log_graph: true           # Whether to log model graph
+        log_attention: false      # Whether to log attention weights (memory intensive)
+
+    # Mixed Precision Training
+    precision:
+        mixed_precision: true     # Enable AMP (Automatic Mixed Precision)
+        amp_level: "O1"           # Optimization level (O1, O2, O3)

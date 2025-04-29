@@ -1,88 +1,120 @@
-import torch.nn as nn
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import math
-import numpy as np
+from typing import Optional, Tuple
 
-class AbsolutePosition(nn.Module):
-    def __init__(self, d_model, max_len=512):
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding with dynamic length handling."""
+    def __init__(self, head_dim: int, max_len: int = 512):
         super().__init__()
-
-        # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model).float()
-        pe.require_grad = False
-
-        position = torch.arange(0, max_len).float().unsqueeze(1)
-        div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()
-
+        self.head_dim = head_dim
+        self.max_len = max_len
+        
+        # Initialize buffer with maximum length
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, head_dim, 2).float() * (-math.log(10000.0) / head_dim))
+        
+        pe = torch.zeros(max_len, head_dim)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return self.pe[:, :x.size(1)]
-    
-class LearnableAbsolutePosition(nn.Module):
-    def __init__(self, d_model, max_len=512):
-        super().__init__()
-
-        self.d_model = d_model
-        self.max_len = max_len
-
-        # Learnable positional embeddings
-        self.pos_embedding = nn.Embedding(max_len, d_model)
-
-    def forward(self, x):
-        """Returns learnable positional encodings matching the input sequence length."""
-        batch_size, seq_len = x.shape[:2]  # Extract batch size and sequence length
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_len, d_model)
         
-        device = self.pos_embedding.weight.device # Get device of the embedding weights
-        
-        # Generate position indices for sequence length
-        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, seq_len)  # (batch_size, seq_len)
-
-        # Get learnable positional embeddings
-        return self.pos_embedding(positions)  # Shape: (batch_size, seq_len, d_model)
-    
-class LearnableRelativePosition(nn.Module):
-    def __init__(self, max_len: int, head_dim: int):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Initializes the relative position encoding module.
-
         Args:
-            max_len (int): Maximum sequence length.
-            dim (int): Embedding dimension.
-        """
-        super().__init__()
-        self.max_len = max_len
-        self.head_dim = head_dim
-
-        # Learnable relative positional embeddings (max_len * 2 - 1)
-        self.relative_position_embeddings = nn.Parameter(
-            torch.randn(2 * max_len - 1, head_dim) * 0.02
-        )
-
-    def forward(self, seq_len: int):
-        """
-        Computes relative position encodings for a given sequence length.
-
-        Args:
-            seq_len (int): Current sequence length.
-
+            x: Tensor of shape (batch_size, seq_len, d_model)
         Returns:
-            torch.Tensor: Relative position embeddings of shape (seq_len, seq_len, dim).
+            Positional encodings matching input sequence length
         """
+        seq_len = x.size(1)
+        if seq_len > self.max_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds maximum length {self.max_len}")
+        return self.pe[:, :seq_len]  # (1, seq_len, d_model)
 
-        # Compute relative position indices
-        positions = torch.arange(seq_len, dtype=torch.long, device=self.relative_position_embeddings.device)
-        relative_indices = positions[:, None] - positions[None, :]  # (seq_len, seq_len)
-        relative_indices += self.max_len - 1  # Shift indices to positive range
+class LearnableAbsolutePosition(nn.Module):
+    """Learnable absolute positional embeddings with dynamic length handling."""
+    def __init__(self, head_dim: int, max_len: int = 512):
+        super().__init__()
+        self.head_dim = head_dim
+        self.max_len = max_len
+        self.pos_embedding = nn.Embedding(max_len, head_dim)
+        
+        # Initialize embeddings properly
+        self._init_embeddings()
+        
+    def _init_embeddings(self) -> None:
+        """Initialize embeddings similar to sinusoidal pattern."""
+        position = torch.arange(self.max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.head_dim, 2).float() * (-math.log(10000.0) / self.head_dim))
+        
+        with torch.no_grad():
+            self.pos_embedding.weight[:, 0::2] = torch.sin(position * div_term)
+            self.pos_embedding.weight[:, 1::2] = torch.cos(position * div_term)
+            
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_len, ...)
+        Returns:
+            Positional embeddings of shape (batch_size, seq_len, d_model)
+        """
+        seq_len = x.size(1)
+        if seq_len > self.max_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds maximum length {self.max_len}")
+            
+        positions = torch.arange(seq_len, device=x.device).expand(x.size(0), seq_len)
+        return self.pos_embedding(positions)  # (batch_size, seq_len, d_model)
 
-        # Get relative position embeddings
-        relative_embeddings = self.relative_position_embeddings[relative_indices]  # (seq_len, seq_len, dim)
-
-        return relative_embeddings
+class DynamicPositionBias(nn.Module):
+    """Dynamic position bias for relative positions with MLP."""
+    def __init__(self, head_dim: int, num_buckets: int = 32, max_distance: int = 128):
+        super().__init__()
+        self.num_buckets = num_buckets
+        self.max_distance = max_distance
+        self.mlp = nn.Sequential(
+            nn.Linear(1, head_dim // 2),
+            nn.ReLU(),
+            nn.Linear(head_dim // 2, head_dim),
+            nn.LayerNorm(head_dim)
+        )
+        
+    def _relative_position_bucket(self, relative_position: torch.Tensor) -> torch.Tensor:
+        """Convert relative positions to buckets."""
+        ret = torch.zeros_like(relative_position)
+        n = -torch.ones_like(relative_position)
+        
+        # Linear buckets close to zero
+        num_buckets = self.num_buckets // 2
+        ret += (relative_position < num_buckets).long() * relative_position
+        
+        # Log-spaced buckets beyond linear range
+        val_if_large = num_buckets + (
+            torch.log(relative_position.float() / num_buckets) / 
+            math.log(self.max_distance / num_buckets) * 
+            (self.num_buckets - num_buckets)
+        ).long()
+        
+        ret += torch.where(
+            relative_position >= num_buckets,
+            torch.min(val_if_large, torch.full_like(val_if_large, self.num_buckets - 1)),
+            n
+        )
+        
+        return ret
+        
+    def forward(self, seq_len: int) -> torch.Tensor:
+        """Generate position bias for attention scores."""
+        device = next(self.parameters()).device
+        positions = torch.arange(seq_len, device=device)
+        relative_pos = positions[:, None] - positions[None, :]  # (seq_len, seq_len)
+        
+        # Bucketize relative positions
+        rp_bucket = self._relative_position_bucket(relative_pos)
+        
+        # Get bias values from MLP
+        bias = self.mlp(rp_bucket.float().unsqueeze(-1))  # (seq_len, seq_len, head_dim)
+        return bias.permute(2, 0, 1)  # (head_dim, seq_len, seq_len) for easy addition
 
 class TimeAwareRelativePosition(nn.Module):
     def __init__(self, max_len: int, head_dim: int):
