@@ -67,14 +67,14 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0, std=self.embed_dim ** -0.5)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sequences: List[List[int]]) -> torch.Tensor:
         """Forward pass with optional mixed precision."""
         with torch.amp.autocast(**self._autocast_kwargs):
             x = self.embedding_layer(x)
             
             # Process through decoder layers
             for layer in self.decoder_layers:
-                x = layer(x)
+                x = layer(x, sequences)
                 
             return self.fc_out(x)
 

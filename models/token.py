@@ -51,7 +51,7 @@ class LogTemplateMiner:
         self.template_miner.save_state("For re-use")
 
 class LogTokenizer:
-    def __init__(self, tokenizer_path=None, vocab_size=30522):
+    def __init__(self, tokenizer_length, tokenizer_path=None, vocab_size=30522):
         """
         Initializes the tokenizer. If a path is provided, it loads an existing tokenizer.
         Otherwise, it creates a new tokenizer.
@@ -60,18 +60,31 @@ class LogTokenizer:
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
         else:
             # Start a new WordLevel tokenizer
-            self.tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
+            self.tokenizer = Tokenizer(models.WordLevel(unk_token="<UNK>"))
             self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
             self.vocab_size = vocab_size
+        self.tokenizer_length = tokenizer_length
 
     def train(self, texts):
         """Trains the tokenizer on a list of texts."""
-        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["<UNK>"])
+        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["<UNK>", "<PAD>"])
         self.tokenizer.train_from_iterator(texts, trainer)
+
+    def pads(self, ids):
+        """Pads the token IDs to a specified maximum length."""
+        if len(ids) < self.tokenizer_length:
+            ids += [0] * (self.tokenizer_length - len(ids))
+        elif len(ids) > self.tokenizer_length:
+            ids = ids[:self.tokenizer_length]
+        return ids[:self.tokenizer_length]
 
     def transform(self, text):
         """Tokenizes and encodes the text into token IDs."""
-        return self.tokenizer.encode(text).ids
+        return self.pads(self.tokenizer.encode(text).ids)
+        
+    def batch_transform(self, texts):
+        """Tokenizes and encodes a batch of texts into token IDs."""
+        return [self.transform(text) for text in texts]
 
     def decode(self, ids):
         """Decodes a sequence of token IDs back into text."""

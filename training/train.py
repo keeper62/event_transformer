@@ -28,7 +28,7 @@ class DataModule(pl.LightningDataModule):
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(config['dataset']['vocab_path'])
+        self.tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
         self.template_miner.load_state()
         
         # Dynamic dataset class loading
@@ -49,8 +49,8 @@ class DataModule(pl.LightningDataModule):
             path=self.config['dataset']['path'],
             prediction_steps=self.config['model']['prediction_steps'],
             context_length=self.config['model']['context_length'],
-            transform=self.template_miner.transform,
-            tokenizer=self.tokenizer,
+            template_miner=self.template_miner.transform,
+            tokenizer=self.tokenizer.transform,
             test_mode=self.test_mode
         )
 
@@ -113,6 +113,9 @@ class TransformerLightning(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
         self.model = Transformer(config)
+        self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
+        self.tokenizer = LogTokenizer(tokenizer_length=config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.template_miner.load_state()
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
@@ -132,8 +135,8 @@ class TransformerLightning(pl.LightningModule):
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []  # Store validation step outputs
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+    def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
+        return self.model(x, sequences)
 
     def _init_metrics(self):
         """Initialize all metrics without computing them."""
@@ -159,25 +162,51 @@ class TransformerLightning(pl.LightningModule):
         self.val_precision = torchmetrics.Precision(task="binary")
         self.val_recall = torchmetrics.Recall(task="binary")
 
-    def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        inputs, targets = batch
-        batch_size, seq_len = inputs.size()
+    def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        inputs, targets, sequences = batch
         device = inputs.device
-        
-        outputs = torch.zeros(batch_size, self.model.n_steps, self.num_classes, device=device)
-        
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-        with torch.amp.autocast(device_type=device_type, 
-                              enabled=self.hparams.config['training'].get('mixed_precision', True) and 
-                                     torch.cuda.is_available()):
+
+        # Initialize output storage
+        outputs = []
+
+        # Get training config
+        autocast_enabled = self.hparams.config['training'].get('mixed_precision', True) and torch.cuda.is_available()
+
+        with torch.amp.autocast(device_type=device.type, enabled=autocast_enabled):
+            # Initialize autoregressive state
+            current_inputs = inputs.clone()
+            current_sequences = sequences.clone()
+
             for step in range(self.model.n_steps):
-                logits = self(inputs)
+                # Forward pass
+                logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
-                preds = logits_last.argmax(dim=-1)
-                outputs[:, step, :] = logits_last
-                inputs = torch.cat([inputs[:, 1:], preds.unsqueeze(1)], dim=1)
-        
+                outputs.append(logits_last)
+
+                # Generate next tokens (no grad)
+                with torch.no_grad():
+                    preds = logits_last.argmax(dim=-1)
+
+                    # Update sequences in one operation
+                    current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
+
+                    # Process templates (single batch operation)
+                    pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
+                    tokenized = self.tokenizer.batch_transform(pred_templates)
+                    current_sequences = torch.cat([
+                        current_sequences[:, 1:], 
+                        torch.tensor(tokenized, device=device).unsqueeze(1)
+                    ], dim=1)
+
+        # Combine outputs
+        outputs = torch.stack(outputs, dim=1).float()  # Convert to float32 for loss
+
         return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
+
+    def on_train_epoch_start(self):
+        # Log initial learning rate at start of each epoch
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("lr", current_lr, prog_bar=True, logger=True)
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
@@ -218,13 +247,13 @@ class TransformerLightning(pl.LightningModule):
         if not self.validation_step_outputs or self.trainer.sanity_checking:
             return
             
-        # Aggregate all validation step outputs
+        # Aggregate validation outputs (your existing code)
         all_preds = torch.cat([x['preds'] for x in self.validation_step_outputs])
         all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
         all_logits = torch.cat([x['logits'] for x in self.validation_step_outputs])
         avg_loss = torch.stack([x['loss'] for x in self.validation_step_outputs]).mean()
         
-        # Update metrics with all validation data
+        # Update metrics (your existing code)
         correct = (all_preds == all_targets).long()
         truth = torch.ones_like(correct)
         
@@ -238,7 +267,10 @@ class TransformerLightning(pl.LightningModule):
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
         
-        # Log all metrics
+        # Get current learning rate
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        
+        # Log all metrics including learning rate
         self.log_dict({
             "val/loss": avg_loss,
             "val/acc": self.val_acc.compute(),
@@ -247,9 +279,17 @@ class TransformerLightning(pl.LightningModule):
             "val/precision": self.val_precision.compute(),
             "val/recall": self.val_recall.compute(),
             "val/best_loss": self.best_val_loss,
+            "lr": current_lr,  # Add learning rate to logs
         }, prog_bar=True)
         
-        # Reset metrics and clear outputs
+        # Add scheduler info to logs
+        scheduler = self.trainer.lr_scheduler_configs[0].scheduler
+        self.log_dict({
+            "scheduler/num_bad_epochs": scheduler.num_bad_epochs,
+            "scheduler/cooldown_counter": scheduler.cooldown_counter,
+        }, logger=True)
+        
+        # Reset metrics and clear outputs (your existing code)
         self.val_acc.reset()
         self.val_top5_acc.reset()
         self.val_f1.reset()
@@ -259,21 +299,22 @@ class TransformerLightning(pl.LightningModule):
         
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
-        
+
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=training_cfg.get('lr', 1e-4),
             weight_decay=training_cfg.get('weight_decay', 0.01)
         )
-        
+
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
-            factor=0.1,
-            patience=3,
-            verbose=True
+            factor=training_cfg.get('lr_factor', 0.1),
+            patience=training_cfg.get('lr_patience', 3),
+            threshold=1e-4,
+            min_lr=1e-6
         )
-        
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {

@@ -30,9 +30,6 @@ class Dataset(AbstractBGLDataset):
                     message_logs.append(parsed)
 
         return self.combine_and_sort_logs(console_logs, message_logs)
-
-    def _read_data_training(self, path):
-        return self._read_data(path)[:1000]
     
     def parse_console_log(self, line: str) -> dict:
         parts = line.strip().split(' ', 2)  # Split into 3 parts: timestamp, hostname, rest
