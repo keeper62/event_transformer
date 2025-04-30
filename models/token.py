@@ -40,7 +40,7 @@ class LogTemplateMiner:
 
     def decode_event_id_sequence(self, event_id):
         """ Converts tokenized event sequence back into a log template. """
-        return " ".join(self.template_miner.drain.id_to_cluster.get(event_id, "<UNK>").log_template_tokens)
+        return " ".join(self.template_miner.drain.id_to_cluster.get(event_id, "[UNK]").log_template_tokens)
     
     def load_state(self):
         """ Loads a previously saved state of the tokenizer. """
@@ -60,14 +60,14 @@ class LogTokenizer:
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
         else:
             # Start a new WordLevel tokenizer
-            self.tokenizer = Tokenizer(models.WordLevel(unk_token="<UNK>"))
+            self.tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
             self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
             self.vocab_size = vocab_size
         self.tokenizer_length = tokenizer_length
 
     def train(self, texts):
         """Trains the tokenizer on a list of texts."""
-        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["<UNK>", "<PAD>"])
+        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["[UNK]"])
         self.tokenizer.train_from_iterator(texts, trainer)
 
     def pads(self, ids):
@@ -80,6 +80,7 @@ class LogTokenizer:
 
     def transform(self, text):
         """Tokenizes and encodes the text into token IDs."""
+        test = self.tokenizer.encode(text).ids
         return self.pads(self.tokenizer.encode(text).ids)
         
     def batch_transform(self, texts):

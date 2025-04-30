@@ -42,10 +42,8 @@ class BaseAttention(nn.Module):
         nn.init.xavier_uniform_(self.out_proj.weight)
         if self.out_proj.bias is not None:
             nn.init.zeros_(self.out_proj.bias)
-        nn.init.xavier_uniform_(self.template_proj[0].weight)
-        nn.init.zeros_(self.template_proj[0].bias)
 
-    def forward(self, x: torch.Tensor, bias: torch.Tensor = None, mask: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
         """Forward pass with optional templates and masking.
         
         Args:
@@ -56,18 +54,10 @@ class BaseAttention(nn.Module):
         with torch.amp.autocast(**self._autocast_kwargs):
             B, T, _ = x.shape
 
-            if bias is not None:
-                # Reshape to match attention heads
-                v_bias = v_bias.view(B, T, self.heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D_head)
-
             # Project queries, keys, values
             qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)  # [B, H, T, D]
-
-            # Add template bias to values if provided
-            if v_bias is not None:
-                v = v + v_bias
-
+            
             # Compute attention scores
             attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
             
@@ -184,10 +174,6 @@ class MultiHeadDenseCollaboration(BaseAttention):
             attn_scores = self.head_collab2(F.relu(self.head_collab1(attn_scores)))
             attn_scores = attn_scores.reshape(B, T, self.heads, -1).transpose(1, 2)
             
-            # Apply positional encoding and mask
-            if self.position_embedding is not None:
-                attn_scores += self.position_embedding(T)
-            
             if mask:
                 attn_scores = self._apply_attention_mask(attn_scores)
             
@@ -229,10 +215,6 @@ class CollaborativeAttention(BaseAttention):
             k_reshaped = k.permute(0, 2, 1, 3).reshape(B, T, -1)
             content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)
             attn_scores += content_bias
-            
-            # Apply positional encoding and mask
-            if self.position_embedding is not None:
-                attn_scores += self.position_embedding(T)
             
             if mask:
                 attn_scores = self._apply_attention_mask(attn_scores)

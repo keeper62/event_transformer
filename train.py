@@ -73,6 +73,7 @@ def train_with_config(
         data_module = DataModule(config, test_mode=test_mode)
         
         config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
+        config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
         
         model = TransformerLightning(
             config, 

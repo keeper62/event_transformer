@@ -5,7 +5,7 @@ base_config:
 
     # Model Hyperparameters
     model:
-        vocab_size: 1825
+        vocab_size:
         embed_dim: 512
         num_heads: 8
         num_layers: 6
@@ -16,11 +16,10 @@ base_config:
         prediction_steps: 2      # The # steps in the future to predict
         num_groups: 8
         dropout: 0.1
-        meaning_vocab_size: 1825 # Vocabulary size for the meaning embedding
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
         # Bias specific
-        bias_injection: "attention"  # Options: "attention", "ffn", "residual"
+        bias_injection: "residual"  # Options: "attention", "ffn", "residual"
         bias_scale: 0.1              # Float multiplier for the bias strength
 
     # Training Parameters
@@ -33,8 +32,8 @@ base_config:
         log_interval: 50         # Log every N steps
         overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
         
-        # FeedForward Network specific
-        ffn_pre_norm: true       # Whether to use LayerNorm before FFN
+       
+        pre_norm: false       # Whether to use LayerNorm before FFN
         residual_scaling: 1.0    # Scale factor for residual connections
         
         # Checkpointing
@@ -72,17 +71,17 @@ base_config:
 
     # Decoder Settings
     decoder:
-        decoder_class: "MultiHeadAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
+        decoder_class: "CollaborativeAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
         share_attention_weights: false       # Whether to share weights between attention layers
         gradient_checkpointing: false        # Enable memory-efficient training
 
     # Dataset Settings
     dataset:
-        name: "bgl"
-        path: "data/BGL.log"
-        class: "bgl_dataset"     # Dataset class name
-        drain_path: "drain3_state.bin"
-        num_workers: 8            # DataLoader workers
+        name: "xc40"
+        path: "data/xc40/"
+        class: "xc40_dataset"     # Dataset class name
+        drain_path: "drain3_state_xc40.bin"
+        num_workers: 4            # DataLoader workers
         pin_memory: true          # Enable for GPU training
         persistent_workers: true  # Maintain workers between epochs
         shuffle: true             # Whether to shuffle training data
@@ -90,7 +89,7 @@ base_config:
     # Logging
     logging:
         log_dir: "logs/"          # Directory for TensorBoard logs
-        experiment_name: "test_run"
+        experiment_name: "xc40_experiment"
         version: "version_0"      # Optional version tag
         log_graph: true           # Whether to log model graph
         log_attention: false      # Whether to log attention weights (memory intensive)
@@ -101,6 +100,6 @@ base_config:
         amp_level: "O1"           # Optimization level (O1, O2, O3)
 
     tokenizer:
-        tokenizer_path: "tokenizer_state.txt"
+        tokenizer_path: "tokenizer_state_xc40.txt"
         tokenizer_length: 512  # Maximum sequence length for tokenization
         vocab_size:
