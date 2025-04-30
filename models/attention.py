@@ -10,6 +10,7 @@ class BaseAttention(nn.Module):
         super().__init__()
         self.config = config
         model_cfg = config['model']
+        atten_cfg = config['attention']
         
         # Core attention parameters
         self.dim = model_cfg['embed_dim']
@@ -20,10 +21,9 @@ class BaseAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         
         # Projection layers
-        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=config['attention'].get('qkv_bias', False))
-        self.out_proj = nn.Linear(self.dim, self.dim, bias=config['attention'].get('out_bias', True))
+        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=atten_cfg.get('qkv_bias', False))
+        self.out_proj = nn.Linear(self.dim, self.dim, bias=atten_cfg.get('out_bias', True))
         self.dropout = nn.Dropout(model_cfg['dropout'])
-        
         
         # Mixed precision support
         self._autocast_kwargs = {
@@ -42,16 +42,31 @@ class BaseAttention(nn.Module):
         nn.init.xavier_uniform_(self.out_proj.weight)
         if self.out_proj.bias is not None:
             nn.init.zeros_(self.out_proj.bias)
+        nn.init.xavier_uniform_(self.template_proj[0].weight)
+        nn.init.zeros_(self.template_proj[0].bias)
 
-
-    def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        """Forward pass with optional masking."""
+    def forward(self, x: torch.Tensor, bias: torch.Tensor = None, mask: bool = True) -> torch.Tensor:
+        """Forward pass with optional templates and masking.
+        
+        Args:
+            x: Input tensor of shape (B, T, D)
+            templates: Template tensor of shape (B, T, tokenizer_length)
+            mask: Whether to apply attention masking
+        """
         with torch.amp.autocast(**self._autocast_kwargs):
             B, T, _ = x.shape
+
+            if bias is not None:
+                # Reshape to match attention heads
+                v_bias = v_bias.view(B, T, self.heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D_head)
 
             # Project queries, keys, values
             qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)  # [B, H, T, D]
+
+            # Add template bias to values if provided
+            if v_bias is not None:
+                v = v + v_bias
 
             # Compute attention scores
             attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale

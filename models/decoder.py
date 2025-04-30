@@ -3,9 +3,24 @@ from models.feed_forward import FeedForward
 import torch
 import torch.nn as nn
 import importlib
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
-import torch.nn.functional as F
+
+class BiasInjection(nn.Module):
+    def __init__(self, method: str, scale: float = 0.1):
+        super().__init__()
+        self.method = method  # "attention", "ffn", "residual"
+        self.scale = scale
+
+    def forward(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+        if self.method == "attention":
+            return x + self.scale * bias  # Bias attention output
+        elif self.method == "ffn":
+            return x + self.scale * bias  # Bias FFN output
+        elif self.method == "residual":
+            return x + self.scale * bias  # Bias residual path
+        else:
+            raise ValueError(f"Unknown bias method: {self.method}")
 
 class TransformerDecoderLayer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
@@ -19,35 +34,8 @@ class TransformerDecoderLayer(nn.Module):
         self._init_components(config)
         self._init_configurations(config)
         
-        # More efficient sequence processing
-        self.sequence_processor = nn.Sequential(
-            nn.Linear(self.tokenizer_length, self.embed_dim),
-            nn.ReLU(),
-            nn.LayerNorm(self.embed_dim)
-        )
-        
-        # Skip the embedding layer and process raw token IDs directly
-        self.token_embedding = None  # Not needed with this approach
-
-    def _process_sequences(self, sequences: torch.Tensor) -> torch.Tensor:
-        """
-        Process sequences without flattening.
-        
-        Args:
-            sequences: (batch_size, context_length, tokenizer_length)
-            
-        Returns:
-            bias: (batch_size, context_length, embed_dim)
-        """
-        # Convert token IDs to one-hot (batch_size, ctx_len, token_len, vocab_size)
-        # Instead we'll process the token patterns directly
-        
-        # Normalize token IDs to 0-1 range
-        sequences = sequences.float() / (self.tokenizer_length - 1)
-        
-        # Process each position independently
-        # (batch_size, ctx_len, token_len) -> (batch_size, ctx_len, embed_dim)
-        return self.sequence_processor(sequences)
+        self.bias_injector = BiasInjection(self.model_cfg.bias_injection, self.model_cfg.bias_scale)
+        self.template_embed = nn.Embedding(self.model_cfg.tokenizer_len, self.model_cfg.embed_dim)
         
     def _init_components(self, config: Dict[str, Any]) -> None:
         """Initialize all layer components."""
@@ -101,49 +89,49 @@ class TransformerDecoderLayer(nn.Module):
         else:
             self.forward = self._forward_impl
 
-    def _forward_impl(self, x: torch.Tensor, sequences: List[List[int]]) -> torch.Tensor:
-        """Main forward implementation with residual connections and RNN bias."""
-        with torch.amp.autocast(**self._autocast_kwargs):
-            # Get RNN bias terms for the sequences
-            rnn_bias = self._process_sequences(sequences)
-            
-            # First sub-layer: masked self-attention
-            residual = x
-            if self.pre_norm:
-                x = self.norm1(x)
-            
-            x = self.attn_masked(x, mask=True)
-            x = self.dropout1(x)
-            x = residual + (x * self.residual_scaling) + rnn_bias
-            
-            if not self.pre_norm:
-                x = self.norm1(x)
-            
-            # Second sub-layer: self-attention
-            residual = x
-            if self.pre_norm:
-                x = self.norm2(x)
-            
-            x = self.attn(x)
-            x = self.dropout2(x)
-            x = residual + (x * self.residual_scaling) + rnn_bias
-            
-            if not self.pre_norm:
-                x = self.norm2(x)
-            
-            # Third sub-layer: feed forward
-            residual = x
-            if self.pre_norm:
-                x = self.norm3(x)
-            
-            x = self.ffn(x)
-            x = self.dropout3(x)
-            x = residual + (x * self.residual_scaling)
-            
-            if not self.pre_norm:
-                x = self.norm3(x)
-            
-            return x
+    def _forward_sublayer(self, x, sublayer_fn, norm, dropout, residual, bias=None):
+        if self.pre_norm:
+            x = norm(x)
+        x_out = sublayer_fn(x)
+        if bias is not None:
+            x_out = self.bias_injector(x_out, bias)  # <-- Unified bias injection
+        x_out = dropout(x_out)
+        return residual + (x_out * self.residual_scaling)
+
+    def _forward_impl(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
+        embed_bias = self.template_embed(sequences)
+        
+        # Sublayer 1: Masked Attention
+        x = self._forward_sublayer(
+            x, 
+            lambda x: self.attn_masked(x, mask=True), 
+            self.norm1, 
+            self.dropout1, 
+            x,  # residual
+            embed_bias if self.bias_injector.method == "attention" else None
+        )
+        
+        # Sublayer 2: Attention
+        x = self._forward_sublayer(
+            x,
+            self.attn,
+            self.norm2,
+            self.dropout2,
+            x,
+            embed_bias if self.bias_injector.method == "attention" else None
+        )
+        
+        # Sublayer 3: FFN
+        x = self._forward_sublayer(
+            x,
+            self.ffn,
+            self.norm3,
+            self.dropout3,
+            x,
+            embed_bias if self.bias_injector.method == "ffn" else None
+        )
+        
+        return x
 
     def get_attention_weights(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Return attention weights from both attention layers if available."""
