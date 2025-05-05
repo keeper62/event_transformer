@@ -138,13 +138,6 @@ class TransformerLightning(pl.LightningModule):
 
     def _init_metrics(self):
         """Initialize all metrics without computing them."""
-        # Training metrics
-        self.train_acc = torchmetrics.Accuracy(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='micro'
-        )
-        
         # Validation metrics
         self.val_acc = torchmetrics.Accuracy(
             task="multiclass",
@@ -210,17 +203,11 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         
         preds = logits.argmax(dim=-1)
-        self.train_acc.update(preds, targets)
         
         self.log("train/loss_step", loss, on_step=True, prog_bar=True)
         self.log("train/loss", loss, on_epoch=True, sync_dist=True)
         return loss
-
-    def on_train_epoch_end(self):
-        if not self.trainer.sanity_checking:
-            self.log("train/acc_epoch", self.train_acc.compute(), prog_bar=True, sync_dist=True)
-            self.train_acc.reset()
-
+    
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
