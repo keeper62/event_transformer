@@ -11,29 +11,47 @@ class AbstractBGLDataset(Dataset, ABC):
         self.context_length = context_length
         self.test_mode = test_mode
         
-        self.data = self._read_data(path)
-        
-        self.data = [(self.template_miner(d), self.tokenizer(d)) for d in self.data]
+        self.data = self._read_data(path)  # -> list of grouped (event_id, message) lists
 
-        # Unpack and store tensors separately for speed
-        self.tokens, self.sequences = zip(*self.data)
-        self.sequences = torch.stack([torch.tensor(self.sequence, dtype=torch.long) for self.sequence in self.sequences])
-        self.tokens = torch.tensor(self.tokens, dtype=torch.long)
-        
-        self.num_lines = len(self.tokens)
+        # Process each group into tokens + sequences
+        self.grouped_data = []
+        for group in self.data:
+            processed = [
+                (int(i), self.tokenizer(d)) for i, d in group
+            ]
+            tokens, sequences = zip(*processed)
+            sequences = torch.stack([torch.tensor(seq, dtype=torch.long) for seq in sequences])
+            tokens = torch.tensor(tokens, dtype=torch.long)
+            self.grouped_data.append((tokens, sequences))
+
+        # Precompute total number of available samples per group
+        self.group_lengths = [
+            max(0, len(group[0]) - self.context_length - self.prediction_steps)
+            for group in self.grouped_data
+        ]
+
+        # Map flat index to (group_idx, local_idx)
+        self.sample_index = []
+        for group_idx, length in enumerate(self.group_lengths):
+            for local_idx in range(length):
+                self.sample_index.append((group_idx, local_idx))
+                
+        del self.data
+        del self.group_lengths
+
+    def __len__(self):
+        return len(self.sample_index)
+
+    def __getitem__(self, idx):
+        group_idx, local_idx = self.sample_index[idx]
+        tokens, sequences = self.grouped_data[group_idx]
+
+        input_window = tokens[local_idx : local_idx + self.context_length]
+        output_window = tokens[local_idx + self.context_length : local_idx + self.context_length + self.prediction_steps]
+        input_sequences = sequences[local_idx : local_idx + self.context_length]
+
+        return input_window, output_window, input_sequences
 
     @abstractmethod
     def _read_data(self, path):
         pass
-
-    def __len__(self):
-        return max(0, self.num_lines - self.context_length - self.prediction_steps)
-
-    def __getitem__(self, idx):
-        input_window = self.tokens[idx: idx + self.context_length]
-        output_window = self.tokens[idx + self.context_length: idx + self.context_length + self.prediction_steps]
-        
-        input_sequences = self.sequences[idx: idx + self.context_length]
-
-        return input_window, output_window, input_sequences
-

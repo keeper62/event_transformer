@@ -39,8 +39,8 @@ def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     # Model checkpoint callback
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename=f"{{config_name}}-{{epoch}}-{{val_loss:.2f}}",
-        monitor="val_loss",
+        filename=f"{{config_name}}-{{epoch}}-{{val/loss:.2f}}",
+        monitor="val/loss",
         mode="min",
         save_top_k=config['training'].get('save_top_k', 1),
         save_last=True,
@@ -50,7 +50,7 @@ def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     # Early stopping callback if configured
     if 'early_stopping' in config['training']:
         early_stop_callback = EarlyStopping(
-            monitor="val_loss",
+            monitor="val/loss",
             patience=config['training']['early_stopping']['patience'],
             mode="min",
             verbose=True,
@@ -89,7 +89,7 @@ def train_with_config(
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp_find_unused_parameters_true' if num_accelerators > 1 else 'auto',
+            strategy='ddp_find_unused_parameters_false' if num_accelerators > 1 else 'auto',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
             gradient_clip_val=config['training'].get('gradient_clip_val', 1.0),

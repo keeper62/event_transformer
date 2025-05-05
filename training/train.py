@@ -1,6 +1,5 @@
 import torchmetrics
 import importlib
-from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import logging
 
@@ -8,8 +7,6 @@ from models import Transformer, LogTemplateMiner, LogTokenizer, compute_class_we
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +90,7 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.config['dataset'].get('num_workers', 4),
             pin_memory=self.config['dataset'].get('pin_memory', True),
             persistent_workers=self.config['dataset'].get('persistent_workers', True),
+            prefetch_factor=2,  
             drop_last=shuffle  # Only drop last for training
         )
 
@@ -204,36 +202,30 @@ class TransformerLightning(pl.LightningModule):
         return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
 
     def on_train_epoch_start(self):
-        # Log initial learning rate at start of each epoch
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-        self.log("lr", current_lr, prog_bar=True, logger=True)
+        self.log("lr", current_lr, prog_bar=True, logger=True, sync_dist=True)
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Update training metrics
         preds = logits.argmax(dim=-1)
         self.train_acc.update(preds, targets)
         
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/loss_step", loss, on_step=True, prog_bar=True)
+        self.log("train/loss", loss, on_epoch=True, sync_dist=True)
         return loss
 
     def on_train_epoch_end(self):
-        # Compute and log training accuracy at epoch end
-        if self.trainer.sanity_checking:
-            return
-            
-        self.log("train/acc_epoch", self.train_acc.compute(), prog_bar=True)
-        self.train_acc.reset()
+        if not self.trainer.sanity_checking:
+            self.log("train/acc_epoch", self.train_acc.compute(), prog_bar=True, sync_dist=True)
+            self.train_acc.reset()
 
-    
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
-        # Store outputs for epoch_end
         self.validation_step_outputs.append({
             'loss': loss,
             'preds': preds,
@@ -241,19 +233,18 @@ class TransformerLightning(pl.LightningModule):
             'logits': logits
         })
         
+        self.log("val/loss_step", loss, on_step=True, sync_dist=True)
         return loss
-
+    
     def on_validation_epoch_end(self):
         if not self.validation_step_outputs or self.trainer.sanity_checking:
             return
             
-        # Aggregate validation outputs (your existing code)
         all_preds = torch.cat([x['preds'] for x in self.validation_step_outputs])
         all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
         all_logits = torch.cat([x['logits'] for x in self.validation_step_outputs])
         avg_loss = torch.stack([x['loss'] for x in self.validation_step_outputs]).mean()
         
-        # Update metrics (your existing code)
         correct = (all_preds == all_targets).long()
         truth = torch.ones_like(correct)
         
@@ -263,14 +254,11 @@ class TransformerLightning(pl.LightningModule):
         self.val_precision.update(correct, truth)
         self.val_recall.update(correct, truth)
         
-        # Track best validation loss
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
         
-        # Get current learning rate
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
         
-        # Log all metrics including learning rate
         self.log_dict({
             "val/loss": avg_loss,
             "val/acc": self.val_acc.compute(),
@@ -279,17 +267,15 @@ class TransformerLightning(pl.LightningModule):
             "val/precision": self.val_precision.compute(),
             "val/recall": self.val_recall.compute(),
             "val/best_loss": self.best_val_loss,
-            "lr": current_lr,  # Add learning rate to logs
-        }, prog_bar=True)
+            "lr": current_lr,
+        }, prog_bar=True, sync_dist=True)
         
-        # Add scheduler info to logs
         scheduler = self.trainer.lr_scheduler_configs[0].scheduler
         self.log_dict({
             "scheduler/num_bad_epochs": scheduler.num_bad_epochs,
             "scheduler/cooldown_counter": scheduler.cooldown_counter,
-        }, logger=True)
+        }, logger=True, sync_dist=True)
         
-        # Reset metrics and clear outputs (your existing code)
         self.val_acc.reset()
         self.val_top5_acc.reset()
         self.val_f1.reset()
@@ -303,7 +289,8 @@ class TransformerLightning(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=training_cfg.get('lr', 1e-4),
-            weight_decay=training_cfg.get('weight_decay', 0.01)
+            weight_decay=training_cfg.get('weight_decay', 0.01),
+            fused=True  # Enable fused implementation for better performance
         )
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
