@@ -78,20 +78,19 @@ class DataModule(pl.LightningDataModule):
         logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
     def get_class_distribution(self) -> torch.Tensor:
-        """Compute the full class distribution across the entire dataset."""
+        """Compute class distribution without any registration."""
         if not self._setup_complete:
             self.setup()
-
-        # Initialize counts
+        
         counts = torch.zeros(self.config['model']['vocab_size'], dtype=torch.long)
-
-        # Count occurrences in training set
+        
+        # For large datasets, consider sampling instead of full iteration
         for i in range(len(self.train_dataset)):
             _, targets, _ = self.train_dataset[i]
             unique, counts_batch = torch.unique(targets, return_counts=True)
             counts[unique] += counts_batch
-
-        return counts.float()  # Return as float for numerical stability
+            
+        return counts.float()  # Return as float tensor
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
         """Helper to create dataloaders with consistent settings."""
@@ -139,7 +138,6 @@ class TransformerLightning(pl.LightningModule):
         
         # Compute weights (only register the final weights)
         self.class_weights = self._compute_adaptive_weights()
-        self.register_buffer('class_weights', self.class_weights)  # Register once here
         
         # Initialize metrics
         self._init_enhanced_metrics()
