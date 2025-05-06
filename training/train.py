@@ -114,18 +114,27 @@ class TransformerLightning(pl.LightningModule):
         self.save_hyperparameters(ignore=['class_weights'])
         self.model = Transformer(config)
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(tokenizer_length=config['tokenizer']['tokenizer_length'], 
-                                    tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.tokenizer = LogTokenizer(
+            tokenizer_length=config['tokenizer']['tokenizer_length'], 
+            tokenizer_path=config['tokenizer']['tokenizer_path']
+        )
         self.template_miner.load_state()
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
         self._init_metrics()
         
+        # Proper device handling for class weights
+        if class_weights is not None:
+            # Register as buffer to automatically handle device placement
+            self.register_buffer('class_weights', class_weights)
+        else:
+            self.class_weights = None
+        
         # Focal Loss configuration
         loss_kwargs = {
-            'alpha': class_weights,  # Will be None if no weights provided
-            'gamma': config['training'].get('focal_gamma', 2.0),  # Default gamma=2.0
+            'alpha': self.class_weights,  # Now properly device-aware
+            'gamma': config['training'].get('focal_gamma', 2.0),
             'reduction': 'mean',
             'label_smoothing': config['training'].get('label_smoothing', 0.1)
         }
@@ -148,12 +157,12 @@ class TransformerLightning(pl.LightningModule):
                 self.reduction = reduction
                 self.ignore_index = ignore_index
                 self.label_smoothing = label_smoothing
-    
+
             def forward(self, inputs, targets):
                 # Ensure inputs and targets are on same device
                 if inputs.device != targets.device:
                     targets = targets.to(inputs.device)
-                    
+
                 if self.num_classes == 1:
                     # Binary case
                     return F.binary_cross_entropy_with_logits(
@@ -174,17 +183,17 @@ class TransformerLightning(pl.LightningModule):
                     )
                     pt = torch.exp(-ce_loss)
                     focal_loss = (1 - pt) ** self.gamma * ce_loss
-    
+
                     if self.reduction == 'mean':
                         return focal_loss.mean()
                     elif self.reduction == 'sum':
                         return focal_loss.sum()
                     return focal_loss
-    
+
         # Ensure class weights are on correct device if provided
         if 'alpha' in kwargs and kwargs['alpha'] is not None:
             kwargs['alpha'] = kwargs['alpha'].to(self.device)
-        
+
         return FocalLoss(**kwargs)
 
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
