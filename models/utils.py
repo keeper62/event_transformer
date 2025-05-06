@@ -4,6 +4,7 @@ import yaml
 from typing import Dict, Any
 from collections import Counter
 import torch
+import math
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -42,26 +43,24 @@ def load_all_configs(config_dir: str = "configs") -> Dict[str, Dict[str, Any]]:
 
     return configs
 
-def compute_class_weights(dataset: list[int], vocab_size: int, device: str = 'cpu') -> torch.Tensor:
+
+def compute_class_weights(dataset: list[int], vocab_size: int) -> torch.Tensor:
     """
     Compute inverse frequency weights normalized so the maximum weight is 1.
 
     Args:
         dataset (list[int]): List of class indices.
         vocab_size (int): Total number of classes.
-        device (str): Device to put weights tensor on.
 
     Returns:
-        torch.Tensor: Weights tensor of shape (vocab_size,) on specified device.
+        torch.Tensor: Weights tensor of shape (vocab_size,), scaled to [0, 1].
     """
     counter = Counter(dataset)
     total_count = sum(counter.values())
-    weights = torch.zeros(vocab_size, dtype=torch.float32, device=device)
+    weights = torch.zeros(vocab_size, dtype=torch.float32)
 
     for class_idx in range(vocab_size):
         class_count = counter.get(class_idx, 0)
-        weights[class_idx] = torch.log(torch.tensor(total_count / (class_count + 1e-6), 
-                                                dtype=torch.float32, device=device))
+        weights[class_idx] = math.log(total_count / (class_count + 1e-6))  
 
-    max_weight = weights.max()
-    return weights / max_weight if max_weight > 0 else torch.ones_like(weights)
+    return weights / weights.max()
