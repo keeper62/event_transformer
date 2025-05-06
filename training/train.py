@@ -81,16 +81,16 @@ class DataModule(pl.LightningDataModule):
         """Compute the full class distribution across the entire dataset."""
         if not self._setup_complete:
             self.setup()
-        
+
         # Initialize counts
         counts = torch.zeros(self.config['model']['vocab_size'], dtype=torch.long)
-        
+
         # Count occurrences in training set
         for i in range(len(self.train_dataset)):
             _, targets, _ = self.train_dataset[i]
             unique, counts_batch = torch.unique(targets, return_counts=True)
             counts[unique] += counts_batch
-            
+
         return counts.float()  # Return as float for numerical stability
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
@@ -122,6 +122,8 @@ class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_distribution: torch.Tensor):
         super().__init__()
         self.save_hyperparameters(ignore=['class_distribution'])
+        
+        # Model components
         self.model = Transformer(config)
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
         self.tokenizer = LogTokenizer(
@@ -132,36 +134,33 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        # Enhanced class weighting
-        self.class_distribution = class_distribution.float()
-        self.class_weights = self._compute_adaptive_weights()
-        self.register_buffer('class_weights', self.class_weights)
+        # Store class distribution (don't register as buffer yet)
+        self._class_distribution = class_distribution.float()
         
-        # Initialize enhanced metrics
+        # Compute weights (only register the final weights)
+        self.class_weights = self._compute_adaptive_weights()
+        self.register_buffer('class_weights', self.class_weights)  # Register once here
+        
+        # Initialize metrics
         self._init_enhanced_metrics()
         
-        # Adaptive loss with temperature
-        self.base_temperature = config['training'].get('temperature', 0.7)
+        # Loss function
         self.loss_fn = self._get_adaptive_focal_loss(
-            alpha=self.class_weights,
+            alpha=self.class_weights,  # Use the registered buffer
             gamma=config['training'].get('focal_gamma', 2.0),
             label_smoothing=config['training'].get('label_smoothing', 0.4),
-            class_distribution=self.class_distribution
+            class_distribution=self._class_distribution  # Use the non-buffer version
         )
         
+        # Training state
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []
 
     def _compute_adaptive_weights(self):
-        """Compute weights using inverse frequency with smoothing and effective sample count."""
-        # Convert to probabilities
-        class_probs = self.class_distribution / self.class_distribution.sum()
-        
-        # Effective number of samples
-        effective_num = 1.0 - torch.pow(0.99, self.class_distribution)
+        """Compute weights without registering as buffer."""
+        class_probs = self._class_distribution / self._class_distribution.sum()
+        effective_num = 1.0 - torch.pow(0.99, self._class_distribution)
         weights = 1.0 / (effective_num + 1e-6)
-        
-        # Normalize and apply sqrt to reduce extreme weights
         weights = torch.sqrt(weights)
         return weights / weights.max()
 
