@@ -55,11 +55,11 @@ def compute_class_weights(dataset: list[int], vocab_size: int) -> torch.Tensor:
         torch.Tensor: Weights tensor of shape (vocab_size,), scaled to [0, 1].
     """
     counter = Counter(dataset)
-    total_count = sum(counter.values())
+    total_count = torch.tensor(sum(counter.values()), dtype=torch.long)
     weights = torch.zeros(vocab_size, dtype=torch.float32)
 
     for class_idx in range(vocab_size):
         class_count = counter.get(class_idx, 0)
-        weights[class_idx] = total_count / (class_count + 1e-6)
+        weights[class_idx] = torch.log(total_count / (class_count + 1e-6))  
 
     return weights / weights.max()
