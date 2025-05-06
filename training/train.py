@@ -135,29 +135,38 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
 
     def _get_focal_loss(self, **kwargs):
-        """Properly handles both binary and multi-class focal loss."""
-        if self.num_classes == 1:
-            # Binary classification case
-            return lambda inputs, targets: F.binary_cross_entropy_with_logits(
-                inputs.squeeze(-1),
-                targets.float(),
-                **{k:v for k,v in kwargs.items() if k != 'label_smoothing'}
-            )
-        else:
-            # Multi-class case
-            class FocalLoss(torch.nn.Module):
-                def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
-                    super().__init__()
-                    self.alpha = alpha
-                    self.gamma = gamma
-                    self.reduction = reduction
-                    self.ignore_index = ignore_index
-                    self.label_smoothing = label_smoothing
-
-                def forward(self, inputs, targets):
+        """Device-aware focal loss that ensures all tensors stay on same device."""
+        class FocalLoss(torch.nn.Module):
+            def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
+                super().__init__()
+                # Register alpha as buffer if provided to ensure proper device movement
+                if alpha is not None:
+                    self.register_buffer('alpha', alpha)
+                else:
+                    self.alpha = None
+                self.gamma = gamma
+                self.reduction = reduction
+                self.ignore_index = ignore_index
+                self.label_smoothing = label_smoothing
+    
+            def forward(self, inputs, targets):
+                # Ensure inputs and targets are on same device
+                if inputs.device != targets.device:
+                    targets = targets.to(inputs.device)
+                    
+                if self.num_classes == 1:
+                    # Binary case
+                    return F.binary_cross_entropy_with_logits(
+                        inputs.squeeze(-1),
+                        targets.float(),
+                        weight=self.alpha,
+                        reduction=self.reduction
+                    )
+                else:
+                    # Multi-class case
                     ce_loss = F.cross_entropy(
                         inputs, 
-                        targets, 
+                        targets,
                         weight=self.alpha,
                         reduction='none',
                         ignore_index=self.ignore_index,
@@ -165,14 +174,18 @@ class TransformerLightning(pl.LightningModule):
                     )
                     pt = torch.exp(-ce_loss)
                     focal_loss = (1 - pt) ** self.gamma * ce_loss
-
+    
                     if self.reduction == 'mean':
                         return focal_loss.mean()
                     elif self.reduction == 'sum':
                         return focal_loss.sum()
                     return focal_loss
-
-            return FocalLoss(**kwargs)
+    
+        # Ensure class weights are on correct device if provided
+        if 'alpha' in kwargs and kwargs['alpha'] is not None:
+            kwargs['alpha'] = kwargs['alpha'].to(self.device)
+        
+        return FocalLoss(**kwargs)
 
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(x, sequences)
@@ -198,13 +211,13 @@ class TransformerLightning(pl.LightningModule):
         # 1. Get inputs and ensure device consistency
         inputs, targets, sequences = batch
         device = inputs.device
-        
+
         # Verify all inputs are on same device
         assert targets.device == device, f"Targets on {targets.device} but inputs on {device}"
         assert sequences.device == device, f"Sequences on {sequences.device} but inputs on {device}"
-        
+
         outputs = []
-        
+
         # 2. Get config parameters
         config = self.hparams.config['training']
         sampling_mode = config.get('sampling_mode', 'top_k')
@@ -212,35 +225,35 @@ class TransformerLightning(pl.LightningModule):
         top_p = config.get('top_p', 0.9)
         temperature = torch.tensor(config.get('temperature', 1.0), device=device)
         autocast_enabled = config.get('mixed_precision', True) and torch.cuda.is_available()
-    
+
         with torch.amp.autocast(device_type=device.type, enabled=autocast_enabled):
             # 3. Initialize state - explicitly clone to same device
             current_inputs = inputs.clone().to(device)
             current_sequences = sequences.clone().to(device)
-    
+
             for step in range(self.model.n_steps):
                 # 4. Forward pass - model should handle device
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
-    
+
                 with torch.no_grad():
                     # 5. Apply temperature
                     logits_last = logits_last / temperature
-                    
+
                     # 6. Sampling - all operations stay on device
                     probs = torch.softmax(logits_last, dim=-1)
-                    
+
                     if sampling_mode == 'top_p':
                         # Nucleus sampling
                         sorted_probs, sorted_indices = torch.sort(probs, descending=True)
                         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-                        
+
                         # Create mask
                         sorted_indices_to_remove = cumulative_probs > top_p
                         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                         sorted_indices_to_remove[..., 0] = False
-                        
+
                         # Apply mask without scatter
                         sorted_probs = torch.where(
                             sorted_indices_to_remove,
@@ -250,26 +263,26 @@ class TransformerLightning(pl.LightningModule):
                         probs = torch.zeros_like(probs, device=device).scatter_(
                             -1, sorted_indices, sorted_probs)
                         probs = probs / probs.sum(dim=-1, keepdim=True)
-                        
+
                         preds = torch.multinomial(probs, num_samples=1).squeeze(1)
                     else:
                         # Top-k sampling
                         topk_probs, topk_indices = torch.topk(probs, k=top_k)
                         preds = torch.multinomial(topk_probs, num_samples=1).squeeze(1)
                         preds = torch.gather(topk_indices, -1, preds.unsqueeze(-1)).squeeze(-1)
-    
+
                     # 7. Update sequences - ensure device consistency
                     current_inputs = torch.cat([
                         current_inputs[:, 1:].to(device),
                         preds.unsqueeze(1).to(device)
                     ], dim=1)
-    
+
                     # 8. Process templates - explicit device placement
                     pred_templates = []
                     for p in preds:
                         template = self.template_miner.decode_event_id_sequence(p.item())
                         pred_templates.append(template)
-                    
+
                     tokenized = self.tokenizer.batch_transform(pred_templates)
                     tokenized_tensor = torch.tensor(
                         tokenized, 
@@ -280,20 +293,20 @@ class TransformerLightning(pl.LightningModule):
                         current_sequences[:, 1:].to(device),
                         tokenized_tensor.unsqueeze(1)
                     ], dim=1)
-    
+
         # 9. Final outputs - ensure device and shape consistency
         outputs_tensor = torch.stack(outputs, dim=1).float().to(device)
         targets = targets.reshape(-1).to(device)
-        
+
         if self.num_classes > 1:
             outputs_tensor = outputs_tensor.reshape(-1, self.num_classes)
         else:
             outputs_tensor = outputs_tensor.squeeze(-1)
-        
+
         # Final device check
         assert outputs_tensor.device == device
         assert targets.device == device
-        
+
         return outputs_tensor, targets
 
     def on_train_epoch_start(self):
