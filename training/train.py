@@ -195,85 +195,106 @@ class TransformerLightning(pl.LightningModule):
         self.val_recall = torchmetrics.Recall(task="binary")
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 1. Get inputs and ensure device consistency
         inputs, targets, sequences = batch
         device = inputs.device
+        
+        # Verify all inputs are on same device
+        assert targets.device == device, f"Targets on {targets.device} but inputs on {device}"
+        assert sequences.device == device, f"Sequences on {sequences.device} but inputs on {device}"
+        
         outputs = []
         
-        # Get sampling parameters from config
-        sampling_mode = self.hparams.config['training'].get('sampling_mode', 'top_k')
-        top_k = self.hparams.config['training'].get('top_k', 5)
-        top_p = self.hparams.config['training'].get('top_p', 0.9)
-        temperature = self.hparams.config['training'].get('temperature', 1.0)
-        
-        # Get training config
-        autocast_enabled = self.hparams.config['training'].get('mixed_precision', True) and torch.cuda.is_available()
-        
+        # 2. Get config parameters
+        config = self.hparams.config['training']
+        sampling_mode = config.get('sampling_mode', 'top_k')
+        top_k = config.get('top_k', 5)
+        top_p = config.get('top_p', 0.9)
+        temperature = torch.tensor(config.get('temperature', 1.0), device=device)
+        autocast_enabled = config.get('mixed_precision', True) and torch.cuda.is_available()
+    
         with torch.amp.autocast(device_type=device.type, enabled=autocast_enabled):
-            current_inputs = inputs.clone()
-            current_sequences = sequences.clone()
+            # 3. Initialize state - explicitly clone to same device
+            current_inputs = inputs.clone().to(device)
+            current_sequences = sequences.clone().to(device)
     
             for step in range(self.model.n_steps):
-                # Forward pass
+                # 4. Forward pass - model should handle device
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
     
                 with torch.no_grad():
-                    # Apply temperature (ensure we have a tensor on correct device)
-                    temp_tensor = torch.tensor(temperature, device=device)
-                    logits_last = logits_last / temp_tensor
+                    # 5. Apply temperature
+                    logits_last = logits_last / temperature
+                    
+                    # 6. Sampling - all operations stay on device
+                    probs = torch.softmax(logits_last, dim=-1)
                     
                     if sampling_mode == 'top_p':
-                        # Nucleus sampling implementation
-                        probs = torch.softmax(logits_last, dim=-1)
+                        # Nucleus sampling
                         sorted_probs, sorted_indices = torch.sort(probs, descending=True)
                         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
                         
-                        # Create mask for tokens to remove
+                        # Create mask
                         sorted_indices_to_remove = cumulative_probs > top_p
                         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                        sorted_indices_to_remove[..., 0] = 0
+                        sorted_indices_to_remove[..., 0] = False
                         
-                        # Scatter the mask to original indices
-                        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                        inf_tensor = torch.tensor(float('-inf'), dtype=logits_last.dtype, device=device)
-                        logits_last = logits_last.scatter(
-                            -1,
-                            indices_to_remove,
-                            inf_tensor
+                        # Apply mask without scatter
+                        sorted_probs = torch.where(
+                            sorted_indices_to_remove,
+                            torch.tensor(0.0, device=device),
+                            sorted_probs
                         )
+                        probs = torch.zeros_like(probs, device=device).scatter_(
+                            -1, sorted_indices, sorted_probs)
+                        probs = probs / probs.sum(dim=-1, keepdim=True)
                         
-                        # Sample from remaining tokens
-                        probs = torch.softmax(logits_last, dim=-1)
                         preds = torch.multinomial(probs, num_samples=1).squeeze(1)
                     else:
-                        # Standard top-k sampling
-                        topk_probs, topk_indices = torch.topk(torch.softmax(logits_last, dim=-1), k=top_k)
+                        # Top-k sampling
+                        topk_probs, topk_indices = torch.topk(probs, k=top_k)
                         preds = torch.multinomial(topk_probs, num_samples=1).squeeze(1)
-                        preds = torch.gather(topk_indices, 1, preds.unsqueeze(1)).squeeze(1)
+                        preds = torch.gather(topk_indices, -1, preds.unsqueeze(-1)).squeeze(-1)
     
-                    # Update sequences
-                    current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
+                    # 7. Update sequences - ensure device consistency
+                    current_inputs = torch.cat([
+                        current_inputs[:, 1:].to(device),
+                        preds.unsqueeze(1).to(device)
+                    ], dim=1)
     
-                    # Process templates (ensure new tensors go to device)
-                    pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
+                    # 8. Process templates - explicit device placement
+                    pred_templates = []
+                    for p in preds:
+                        template = self.template_miner.decode_event_id_sequence(p.item())
+                        pred_templates.append(template)
+                    
                     tokenized = self.tokenizer.batch_transform(pred_templates)
-                    tokenized_tensor = torch.tensor(tokenized, device=device, dtype=current_sequences.dtype)
+                    tokenized_tensor = torch.tensor(
+                        tokenized, 
+                        dtype=current_sequences.dtype,
+                        device=device
+                    )
                     current_sequences = torch.cat([
-                        current_sequences[:, 1:], 
+                        current_sequences[:, 1:].to(device),
                         tokenized_tensor.unsqueeze(1)
                     ], dim=1)
     
-        # Ensure final outputs are on correct device and type
-        outputs = torch.stack(outputs, dim=1).float().to(device)
+        # 9. Final outputs - ensure device and shape consistency
+        outputs_tensor = torch.stack(outputs, dim=1).float().to(device)
         targets = targets.reshape(-1).to(device)
         
         if self.num_classes > 1:
-            outputs = outputs.reshape(-1, self.num_classes)
+            outputs_tensor = outputs_tensor.reshape(-1, self.num_classes)
         else:
-            outputs = outputs.squeeze(-1)
-            
-        return outputs, targets
+            outputs_tensor = outputs_tensor.squeeze(-1)
+        
+        # Final device check
+        assert outputs_tensor.device == device
+        assert targets.device == device
+        
+        return outputs_tensor, targets
 
     def on_train_epoch_start(self):
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
