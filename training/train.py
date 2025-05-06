@@ -135,17 +135,16 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
 
     def _get_focal_loss(self, **kwargs):
-        """Helper to initialize Focal Loss with proper parameters."""
-        try:
-            from torchvision.ops import sigmoid_focal_loss
-            # For binary/multi-label cases (not our case)
-            return lambda inputs, targets: sigmoid_focal_loss(
-                inputs, 
-                F.one_hot(targets, num_classes=self.num_classes).float(),
+        """Properly handles both binary and multi-class focal loss."""
+        if self.num_classes == 1:
+            # Binary classification case
+            return lambda inputs, targets: F.binary_cross_entropy_with_logits(
+                inputs.squeeze(-1),
+                targets.float(),
                 **{k:v for k,v in kwargs.items() if k != 'label_smoothing'}
             )
-        except ImportError:
-            # Fallback to our implementation for multiclass
+        else:
+            # Multi-class case
             class FocalLoss(torch.nn.Module):
                 def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
                     super().__init__()
