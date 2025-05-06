@@ -136,51 +136,51 @@ class TransformerLightning(pl.LightningModule):
 
     def _get_focal_loss(self, **kwargs):
         """Helper to initialize Focal Loss with proper parameters."""
-        try:
-            from torchvision.ops import sigmoid_focal_loss
-            # For binary/multi-label cases (not our case)
-            return lambda inputs, targets: sigmoid_focal_loss(
-                inputs, 
-                F.one_hot(targets, num_classes=self.num_classes).float(),
-                **{k:v for k,v in kwargs.items() if k != 'label_smoothing'}
-            )
-        except ImportError:
-            # Fallback to our implementation for multiclass
-            class FocalLoss(torch.nn.Module):
-                def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
-                    super().__init__()
-                    self.alpha = alpha
-                    self.gamma = gamma
-                    self.reduction = reduction
-                    self.ignore_index = ignore_index
-                    self.label_smoothing = label_smoothing
-                
-                def forward(self, inputs, targets):
-                    ce_loss = F.cross_entropy(
-                        inputs, 
-                        targets, 
-                        weight=self.alpha,
-                        reduction='none',
-                        ignore_index=self.ignore_index,
-                        label_smoothing=self.label_smoothing
-                    )
-                    pt = torch.exp(-ce_loss)
-                    focal_loss = (1 - pt) ** self.gamma * ce_loss
-                    
-                    if self.reduction == 'mean':
-                        return focal_loss.mean()
-                    elif self.reduction == 'sum':
-                        return focal_loss.sum()
-                    return focal_loss
-            
-            return FocalLoss(**kwargs)
+        class FocalLoss(torch.nn.Module):
+            def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
+                super().__init__()
+                self.alpha = alpha
+                self.gamma = gamma
+                self.reduction = reduction
+                self.ignore_index = ignore_index
+                self.label_smoothing = label_smoothing
+
+            def forward(self, inputs, targets):
+                # Convert targets to long if needed
+                targets = targets.long()
+
+                # Handle ignore_index by creating a mask
+                mask = targets != self.ignore_index
+                targets = targets[mask]
+                inputs = inputs[mask]
+
+                if targets.numel() == 0:  # All targets were ignored
+                    return torch.tensor(0.0, device=inputs.device)
+
+                ce_loss = F.cross_entropy(
+                    inputs, 
+                    targets, 
+                    weight=self.alpha,
+                    reduction='none',
+                    label_smoothing=self.label_smoothing
+                )
+                pt = torch.exp(-ce_loss)
+                focal_loss = (1 - pt) ** self.gamma * ce_loss
+
+                if self.reduction == 'mean':
+                    return focal_loss.mean()
+                elif self.reduction == 'sum':
+                    return focal_loss.sum()
+                return focal_loss
+
+        return FocalLoss(**kwargs)
 
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(x, sequences)
 
     def _init_metrics(self):
         """Initialize all metrics without computing them."""
-        # Validation metrics
+        # Validation metrics - changed to multiclass
         self.val_acc = torchmetrics.Accuracy(
             task="multiclass",
             num_classes=self.num_classes,
@@ -191,9 +191,22 @@ class TransformerLightning(pl.LightningModule):
             num_classes=self.num_classes,
             top_k=5
         )
-        self.val_f1 = torchmetrics.F1Score(task="binary")
-        self.val_precision = torchmetrics.Precision(task="binary")
-        self.val_recall = torchmetrics.Recall(task="binary")
+        # Changed these to multiclass as well
+        self.val_f1 = torchmetrics.F1Score(
+            task="multiclass", 
+            num_classes=self.num_classes,
+            average='macro'
+        )
+        self.val_precision = torchmetrics.Precision(
+            task="multiclass",
+            num_classes=self.num_classes,
+            average='macro'
+        )
+        self.val_recall = torchmetrics.Recall(
+            task="multiclass",
+            num_classes=self.num_classes,
+            average='macro'
+        )
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
@@ -276,14 +289,12 @@ class TransformerLightning(pl.LightningModule):
         all_logits = torch.cat([x['logits'] for x in self.validation_step_outputs])
         avg_loss = torch.stack([x['loss'] for x in self.validation_step_outputs]).mean()
         
-        correct = (all_preds == all_targets).long()
-        truth = torch.ones_like(correct)
-        
+        # Update metrics with proper inputs
         self.val_acc.update(all_preds, all_targets)
         self.val_top5_acc.update(all_logits, all_targets)
-        self.val_f1.update(correct, truth)
-        self.val_precision.update(correct, truth)
-        self.val_recall.update(correct, truth)
+        self.val_f1.update(all_preds, all_targets)  # Changed from correct/truth
+        self.val_precision.update(all_preds, all_targets)
+        self.val_recall.update(all_preds, all_targets)
         
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
