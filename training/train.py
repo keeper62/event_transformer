@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
 
+from torch.functional import F
+
 logger = logging.getLogger(__name__)
 
 class DataModule(pl.LightningDataModule):
@@ -112,26 +114,66 @@ class TransformerLightning(pl.LightningModule):
         self.save_hyperparameters(ignore=['class_weights'])
         self.model = Transformer(config)
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(tokenizer_length=config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.tokenizer = LogTokenizer(tokenizer_length=config['tokenizer']['tokenizer_length'], 
+                                    tokenizer_path=config['tokenizer']['tokenizer_path'])
         self.template_miner.load_state()
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        # Initialize metrics as attributes but don't compute them yet
         self._init_metrics()
         
-        # Loss function
+        # Focal Loss configuration
         loss_kwargs = {
-            'label_smoothing': config['training'].get('label_smoothing', 0.1),
-            'ignore_index': 0
+            'alpha': class_weights,  # Will be None if no weights provided
+            'gamma': config['training'].get('focal_gamma', 2.0),  # Default gamma=2.0
+            'reduction': 'mean',
+            'label_smoothing': config['training'].get('label_smoothing', 0.1)
         }
-        if class_weights is not None:
-            loss_kwargs['weight'] = class_weights
-        self.loss_fn = torch.nn.CrossEntropyLoss(**loss_kwargs)
+        self.loss_fn = self._get_focal_loss(**loss_kwargs)
         
-        # Track best validation loss
         self.best_val_loss = float('inf')
-        self.validation_step_outputs = []  # Store validation step outputs
+        self.validation_step_outputs = []
+
+    def _get_focal_loss(self, **kwargs):
+        """Helper to initialize Focal Loss with proper parameters."""
+        try:
+            from torchvision.ops import sigmoid_focal_loss
+            # For binary/multi-label cases (not our case)
+            return lambda inputs, targets: sigmoid_focal_loss(
+                inputs, 
+                F.one_hot(targets, num_classes=self.num_classes).float(),
+                **{k:v for k,v in kwargs.items() if k != 'label_smoothing'}
+            )
+        except ImportError:
+            # Fallback to our implementation for multiclass
+            class FocalLoss(torch.nn.Module):
+                def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
+                    super().__init__()
+                    self.alpha = alpha
+                    self.gamma = gamma
+                    self.reduction = reduction
+                    self.ignore_index = ignore_index
+                    self.label_smoothing = label_smoothing
+                
+                def forward(self, inputs, targets):
+                    ce_loss = F.cross_entropy(
+                        inputs, 
+                        targets, 
+                        weight=self.alpha,
+                        reduction='none',
+                        ignore_index=self.ignore_index,
+                        label_smoothing=self.label_smoothing
+                    )
+                    pt = torch.exp(-ce_loss)
+                    focal_loss = (1 - pt) ** self.gamma * ce_loss
+                    
+                    if self.reduction == 'mean':
+                        return focal_loss.mean()
+                    elif self.reduction == 'sum':
+                        return focal_loss.sum()
+                    return focal_loss
+            
+            return FocalLoss(**kwargs)
 
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(x, sequences)
@@ -204,7 +246,7 @@ class TransformerLightning(pl.LightningModule):
     
                     # Update sequences
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
-    
+
                     # Process templates
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
@@ -212,7 +254,7 @@ class TransformerLightning(pl.LightningModule):
                         current_sequences[:, 1:], 
                         torch.tensor(tokenized, device=device).unsqueeze(1)
                     ], dim=1)
-    
+
         outputs = torch.stack(outputs, dim=1).float()
         return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
 

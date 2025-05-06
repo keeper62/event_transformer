@@ -4,6 +4,7 @@ import yaml
 from typing import Dict, Any
 from collections import Counter
 import torch
+import math
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -60,6 +61,6 @@ def compute_class_weights(dataset: list[int], vocab_size: int) -> torch.Tensor:
 
     for class_idx in range(vocab_size):
         class_count = counter.get(class_idx, 0)
-        weights[class_idx] = total_count / (class_count + 1e-6)
+        weights[class_idx] = math.log(total_count / (class_count + 1e-6))  
 
     return weights / weights.max()
