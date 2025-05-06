@@ -109,100 +109,109 @@ class DataModule(pl.LightningDataModule):
 
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], config_name: str, class_weights: Optional[torch.Tensor] = None):
+    def __init__(self, config: Dict[str, Any], config_name: str, class_distribution: torch.Tensor):
         super().__init__()
-        self.save_hyperparameters(ignore=['class_weights'])
+        self.save_hyperparameters(ignore=['class_distribution'])
         self.model = Transformer(config)
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
         self.tokenizer = LogTokenizer(
-            tokenizer_length=config['tokenizer']['tokenizer_length'], 
+            tokenizer_length=config['tokenizer']['tokenizer_length'],
             tokenizer_path=config['tokenizer']['tokenizer_path']
         )
         self.template_miner.load_state()
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        # Initialize multiclass metrics
-        self._init_multiclass_metrics()
+        # Enhanced class weighting
+        self.class_distribution = class_distribution.float()
+        self.class_weights = self._compute_adaptive_weights()
+        self.register_buffer('class_weights', self.class_weights)
         
-        # Class weights handling
-        if class_weights is not None:
-            self.register_buffer('class_weights', class_weights)
-        else:
-            self.class_weights = None
+        # Initialize enhanced metrics
+        self._init_enhanced_metrics()
         
-        # Multiclass focal loss
-        self.loss_fn = self._get_multiclass_focal_loss(
+        # Adaptive loss with temperature
+        self.base_temperature = config['training'].get('temperature', 0.7)
+        self.loss_fn = self._get_adaptive_focal_loss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
-            reduction='mean',
-            label_smoothing=config['training'].get('label_smoothing', 0.1)
+            label_smoothing=config['training'].get('label_smoothing', 0.4),
+            class_distribution=self.class_distribution
         )
         
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []
 
-    def _init_multiclass_metrics(self):
-        """Initialize proper multiclass metrics."""
+    def _compute_adaptive_weights(self):
+        """Compute weights using inverse frequency with smoothing and effective sample count."""
+        # Convert to probabilities
+        class_probs = self.class_distribution / self.class_distribution.sum()
+        
+        # Effective number of samples
+        effective_num = 1.0 - torch.pow(0.99, self.class_distribution)
+        weights = 1.0 / (effective_num + 1e-6)
+        
+        # Normalize and apply sqrt to reduce extreme weights
+        weights = torch.sqrt(weights)
+        return weights / weights.max()
+
+    def _init_enhanced_metrics(self):
+        """Initialize metrics with rare class tracking."""
+        # Main metrics
         self.val_acc = torchmetrics.Accuracy(
-            task="multiclass",
+            task="multiclass", 
             num_classes=self.num_classes,
             average='micro'
         )
-        self.val_top5_acc = torchmetrics.Accuracy(
+        
+        # Weighted metrics (more focus on rare classes)
+        self.val_weighted_f1 = torchmetrics.F1Score(
             task="multiclass",
             num_classes=self.num_classes,
-            top_k=5
+            average='weighted'
         )
-        self.val_f1 = torchmetrics.F1Score(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='macro'
-        )
-        self.val_precision = torchmetrics.Precision(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='macro'
-        )
-        self.val_recall = torchmetrics.Recall(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='macro'
-        )
+        
+        # Rare class tracking (bottom 10% frequency classes)
+        rare_threshold = torch.quantile(self.class_distribution, 0.1)
+        self.rare_classes = torch.where(self.class_distribution < rare_threshold)[0]
+        
+        self.rare_metrics = torchmetrics.MetricCollection({
+            f'rare_class_{i}_f1': torchmetrics.F1Score(
+                task="multiclass",
+                num_classes=self.num_classes,
+                average='none'
+            ) for i in self.rare_classes
+        })
 
-    def _get_multiclass_focal_loss(self, **kwargs):
-        """Multiclass focal loss implementation."""
-        class FocalLoss(torch.nn.Module):
-            def __init__(self, alpha=None, gamma=2.0, reduction='mean', label_smoothing=0.0):
+    def _get_adaptive_focal_loss(self, alpha, gamma, label_smoothing, class_distribution):
+        """Focal loss with class-adaptive gamma and temperature."""
+        class AdaptiveFocalLoss(torch.nn.Module):
+            def __init__(self, alpha, gamma, label_smoothing, class_distribution):
                 super().__init__()
-                if alpha is not None:
-                    self.register_buffer('alpha', alpha)
-                else:
-                    self.alpha = None
-                self.gamma = gamma
-                self.reduction = reduction
+                self.register_buffer('alpha', alpha)
+                self.base_gamma = gamma
                 self.label_smoothing = label_smoothing
-
+                
+                # Gamma adjustment - higher for frequent classes
+                class_freq_norm = class_distribution / class_distribution.sum()
+                self.register_buffer('gamma_adjustment', torch.log(class_freq_norm + 1e-6))
+                
             def forward(self, inputs, targets):
+                # Class-specific gamma
+                class_gamma = self.base_gamma * (1 + self.gamma_adjustment[targets])
+                
                 ce_loss = F.cross_entropy(
-                    inputs, 
-                    targets,
+                    inputs, targets,
                     weight=self.alpha,
                     reduction='none',
                     label_smoothing=self.label_smoothing
                 )
+                
                 pt = torch.exp(-ce_loss)
-                focal_loss = (1 - pt) ** self.gamma * ce_loss
-
-                if self.reduction == 'mean':
-                    return focal_loss.mean()
-                elif self.reduction == 'sum':
-                    return focal_loss.sum()
-                return focal_loss
-
-        if 'alpha' in kwargs and kwargs['alpha'] is not None:
-            kwargs['alpha'] = kwargs['alpha'].to(self.device)
-        return FocalLoss(**kwargs)
+                focal_loss = (1 - pt) ** class_gamma * ce_loss
+                return focal_loss.mean()
+        
+        return AdaptiveFocalLoss(alpha, gamma, label_smoothing, class_distribution)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
@@ -219,7 +228,11 @@ class TransformerLightning(pl.LightningModule):
                 outputs.append(logits_last)
 
                 with torch.no_grad():
-                    probs = torch.softmax(logits_last, dim=-1)
+                    # Dynamic temperature per class
+                    class_probs = self.class_distribution / self.class_distribution.sum()
+                    temperature = self.base_temperature + (0.2 * (1 - class_probs[targets]))
+                    
+                    probs = torch.softmax(logits_last / temperature.to(device), dim=-1)
                     preds = probs.argmax(dim=-1)
                     
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
@@ -237,6 +250,14 @@ class TransformerLightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
+        
+        # Track rare class accuracy during training
+        preds = logits.argmax(dim=-1)
+        for i in self.rare_classes:
+            mask = targets == i
+            if mask.any():
+                self.log(f'train/rare_class_{i}_acc', (preds[mask] == targets[mask]).float().mean())
+        
         self.log("train/loss", loss, prog_bar=True)
         return loss
     
@@ -245,32 +266,49 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
-        # Update multiclass metrics
+        # Update all metrics
         self.val_acc(preds, targets)
-        self.val_top5_acc(logits, targets)
-        self.val_f1(preds, targets)
-        self.val_precision(preds, targets)
-        self.val_recall(preds, targets)
+        self.val_weighted_f1(preds, targets)
+        self.rare_metrics(preds, targets)
+        
+        self.validation_step_outputs.append({
+            'preds': preds,
+            'targets': targets,
+            'loss': loss
+        })
         
         self.log("val/loss", loss, prog_bar=True)
         return loss
     
     def on_validation_epoch_end(self):
+        # Compute and log metrics
+        all_preds = torch.cat([x['preds'] for x in self.validation_step_outputs])
+        all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
+        
+        # Main metrics
         self.log_dict({
-            "val/acc": self.val_acc.compute(),
-            "val/top5_acc": self.val_top5_acc.compute(),
-            "val/f1": self.val_f1.compute(),
-            "val/precision": self.val_precision.compute(), 
-            "val/recall": self.val_recall.compute()
+            'val/acc': self.val_acc.compute(),
+            'val/weighted_f1': self.val_weighted_f1.compute(),
+            'val/loss': torch.stack([x['loss'] for x in self.validation_step_outputs]).mean(),
         }, prog_bar=True)
         
-        # Reset metrics
-        self.val_acc.reset()
-        self.val_top5_acc.reset()
-        self.val_f1.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
+        # Rare class metrics
+        rare_metrics = self.rare_metrics.compute()
+        for i, metric in zip(self.rare_classes, rare_metrics.values()):
+            self.log(f'val/rare_class_{i}_f1', metric)
         
+        # Class distribution analysis
+        for i in range(min(10, self.num_classes)):  # First 10 classes
+            class_mask = all_targets == i
+            if class_mask.any():
+                self.log(f'val/class_{i}_support', class_mask.sum())
+        
+        # Reset all metrics
+        self.val_acc.reset()
+        self.val_weighted_f1.reset()
+        self.rare_metrics.reset()
+        self.validation_step_outputs.clear()
+
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
 
@@ -278,7 +316,7 @@ class TransformerLightning(pl.LightningModule):
             self.parameters(),
             lr=training_cfg.get('lr', 1e-4),
             weight_decay=training_cfg.get('weight_decay', 0.01),
-            fused=True  # Enable fused implementation for better performance
+            fused=True
         )
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
