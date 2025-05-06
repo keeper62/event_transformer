@@ -156,42 +156,64 @@ class TransformerLightning(pl.LightningModule):
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         device = inputs.device
-
-        # Initialize output storage
         outputs = []
-
+        
+        # Get sampling parameters from config
+        sampling_mode = self.hparams.config['training'].get('sampling_mode', 'top_k')
+        top_k = self.hparams.config['training'].get('top_k', 5)
+        top_p = self.hparams.config['training'].get('top_p', 0.9)
+        temperature = self.hparams.config['training'].get('temperature', 1.0)
+        
         # Get training config
         autocast_enabled = self.hparams.config['training'].get('mixed_precision', True) and torch.cuda.is_available()
-
+        
         with torch.amp.autocast(device_type=device.type, enabled=autocast_enabled):
-            # Initialize autoregressive state
             current_inputs = inputs.clone()
             current_sequences = sequences.clone()
-
+    
             for step in range(self.model.n_steps):
                 # Forward pass
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
-
-                # Generate next tokens (no grad)
+    
                 with torch.no_grad():
-                    preds = logits_last.argmax(dim=-1)
-
-                    # Update sequences in one operation
+                    # Apply temperature
+                    logits_last = logits_last / temperature
+                    
+                    if sampling_mode == 'top_p':
+                        # Nucleus sampling implementation
+                        probs = torch.softmax(logits_last, dim=-1)
+                        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                        
+                        # Remove tokens with cumulative probability above threshold
+                        sorted_indices_to_remove = cumulative_probs > top_p
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 0] = 0
+                        
+                        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                        logits_last.scatter_(-1, indices_to_remove, float('-inf'))
+                        
+                        preds = torch.multinomial(torch.softmax(logits_last, dim=-1), num_samples=1).squeeze(1)
+                    else:
+                        # Standard top-k sampling
+                        topk_probs, topk_indices = torch.topk(torch.softmax(logits_last, dim=-1), k=top_k)
+                        preds = torch.multinomial(topk_probs, num_samples=1).squeeze(1)
+                        preds = torch.gather(topk_indices, 1, preds.unsqueeze(1)).squeeze(1)
+    
+                    # Update sequences
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
-
-                    # Process templates (single batch operation)
+    
+                    # Process templates
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
                         torch.tensor(tokenized, device=device).unsqueeze(1)
                     ], dim=1)
-
-        # Combine outputs
-        outputs = torch.stack(outputs, dim=1).float()  # Convert to float32 for loss
-
+    
+        outputs = torch.stack(outputs, dim=1).float()
         return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
 
     def on_train_epoch_start(self):
