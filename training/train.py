@@ -136,7 +136,8 @@ class TransformerLightning(pl.LightningModule):
             'alpha': self.class_weights,  # Now properly device-aware
             'gamma': config['training'].get('focal_gamma', 2.0),
             'reduction': 'mean',
-            'label_smoothing': config['training'].get('label_smoothing', 0.1)
+            'label_smoothing': config['training'].get('label_smoothing', 0.1),
+            'num_classes': self.num_classes
         }
         self.loss_fn = self._get_focal_loss(**loss_kwargs)
         
@@ -146,7 +147,7 @@ class TransformerLightning(pl.LightningModule):
     def _get_focal_loss(self, **kwargs):
         """Device-aware focal loss that ensures all tensors stay on same device."""
         class FocalLoss(torch.nn.Module):
-            def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0):
+            def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0, num_classes=2):
                 super().__init__()
                 # Register alpha as buffer if provided to ensure proper device movement
                 if alpha is not None:
@@ -157,6 +158,7 @@ class TransformerLightning(pl.LightningModule):
                 self.reduction = reduction
                 self.ignore_index = ignore_index
                 self.label_smoothing = label_smoothing
+                self.num_classes = num_classes
 
             def forward(self, inputs, targets):
                 # Ensure inputs and targets are on same device
