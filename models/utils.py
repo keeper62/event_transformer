@@ -42,29 +42,26 @@ def load_all_configs(config_dir: str = "configs") -> Dict[str, Dict[str, Any]]:
 
     return configs
 
-
-def compute_class_weights(dataset: list[int], vocab_size: int) -> torch.Tensor:
+def compute_class_weights(dataset: list[int], vocab_size: int, device: str = 'cpu') -> torch.Tensor:
     """
     Compute inverse frequency weights normalized so the maximum weight is 1.
 
     Args:
         dataset (list[int]): List of class indices.
         vocab_size (int): Total number of classes.
+        device (str): Device to put weights tensor on.
 
     Returns:
-        torch.Tensor: Weights tensor of shape (vocab_size,), scaled to [0, 1].
+        torch.Tensor: Weights tensor of shape (vocab_size,) on specified device.
     """
     counter = Counter(dataset)
-    total_count = sum(counter.values())  # Keep as Python integer
-    weights = torch.zeros(vocab_size, dtype=torch.float32)
+    total_count = sum(counter.values())
+    weights = torch.zeros(vocab_size, dtype=torch.float32, device=device)
 
     for class_idx in range(vocab_size):
         class_count = counter.get(class_idx, 0)
-        # Compute using Python scalars, then convert to tensor
-        weights[class_idx] = torch.log(torch.tensor(total_count / (class_count + 1e-6), dtype=torch.float32))
+        weights[class_idx] = torch.log(torch.tensor(total_count / (class_count + 1e-6), 
+                                                dtype=torch.float32, device=device))
 
-    # Handle case where all weights are zero (unlikely but possible)
-    if weights.max() == 0:
-        return torch.ones_like(weights)
-    
-    return weights / weights.max()
+    max_weight = weights.max()
+    return weights / max_weight if max_weight > 0 else torch.ones_like(weights)
