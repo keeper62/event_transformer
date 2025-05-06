@@ -153,7 +153,7 @@ class TransformerLightning(pl.LightningModule):
                     self.reduction = reduction
                     self.ignore_index = ignore_index
                     self.label_smoothing = label_smoothing
-                
+
                 def forward(self, inputs, targets):
                     ce_loss = F.cross_entropy(
                         inputs, 
@@ -165,13 +165,13 @@ class TransformerLightning(pl.LightningModule):
                     )
                     pt = torch.exp(-ce_loss)
                     focal_loss = (1 - pt) ** self.gamma * ce_loss
-                    
+
                     if self.reduction == 'mean':
                         return focal_loss.mean()
                     elif self.reduction == 'sum':
                         return focal_loss.sum()
                     return focal_loss
-            
+
             return FocalLoss(**kwargs)
 
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
@@ -219,8 +219,9 @@ class TransformerLightning(pl.LightningModule):
                 outputs.append(logits_last)
     
                 with torch.no_grad():
-                    # Apply temperature
-                    logits_last = logits_last / temperature
+                    # Apply temperature (ensure we have a tensor on correct device)
+                    temp_tensor = torch.tensor(temperature, device=device)
+                    logits_last = logits_last / temp_tensor
                     
                     if sampling_mode == 'top_p':
                         # Nucleus sampling implementation
@@ -228,15 +229,23 @@ class TransformerLightning(pl.LightningModule):
                         sorted_probs, sorted_indices = torch.sort(probs, descending=True)
                         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
                         
-                        # Remove tokens with cumulative probability above threshold
+                        # Create mask for tokens to remove
                         sorted_indices_to_remove = cumulative_probs > top_p
                         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                         sorted_indices_to_remove[..., 0] = 0
                         
+                        # Scatter the mask to original indices
                         indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                        logits_last.scatter_(-1, indices_to_remove, float('-inf'))
+                        inf_tensor = torch.tensor(float('-inf'), dtype=logits_last.dtype, device=device)
+                        logits_last = logits_last.scatter(
+                            -1,
+                            indices_to_remove,
+                            inf_tensor
+                        )
                         
-                        preds = torch.multinomial(torch.softmax(logits_last, dim=-1), num_samples=1).squeeze(1)
+                        # Sample from remaining tokens
+                        probs = torch.softmax(logits_last, dim=-1)
+                        preds = torch.multinomial(probs, num_samples=1).squeeze(1)
                     else:
                         # Standard top-k sampling
                         topk_probs, topk_indices = torch.topk(torch.softmax(logits_last, dim=-1), k=top_k)
@@ -245,17 +254,26 @@ class TransformerLightning(pl.LightningModule):
     
                     # Update sequences
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
-
-                    # Process templates
+    
+                    # Process templates (ensure new tensors go to device)
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
+                    tokenized_tensor = torch.tensor(tokenized, device=device, dtype=current_sequences.dtype)
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
-                        torch.tensor(tokenized, device=device).unsqueeze(1)
+                        tokenized_tensor.unsqueeze(1)
                     ], dim=1)
-
-        outputs = torch.stack(outputs, dim=1).float()
-        return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
+    
+        # Ensure final outputs are on correct device and type
+        outputs = torch.stack(outputs, dim=1).float().to(device)
+        targets = targets.reshape(-1).to(device)
+        
+        if self.num_classes > 1:
+            outputs = outputs.reshape(-1, self.num_classes)
+        else:
+            outputs = outputs.squeeze(-1)
+            
+        return outputs, targets
 
     def on_train_epoch_start(self):
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
