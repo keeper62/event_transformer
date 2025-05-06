@@ -77,11 +77,21 @@ class DataModule(pl.LightningDataModule):
         self._setup_complete = True
         logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
-    def get_class_weights(self) -> torch.Tensor:
-        """Compute class weights for imbalanced datasets."""
+    def get_class_distribution(self) -> torch.Tensor:
+        """Compute the full class distribution across the entire dataset."""
         if not self._setup_complete:
             self.setup()
-        return compute_class_weights(self.train_dataset, self.config['model']['vocab_size'])
+        
+        # Initialize counts
+        counts = torch.zeros(self.config['model']['vocab_size'], dtype=torch.long)
+        
+        # Count occurrences in training set
+        for i in range(len(self.train_dataset)):
+            _, targets, _ = self.train_dataset[i]
+            unique, counts_batch = torch.unique(targets, return_counts=True)
+            counts[unique] += counts_batch
+            
+        return counts.float()  # Return as float for numerical stability
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
         """Helper to create dataloaders with consistent settings."""

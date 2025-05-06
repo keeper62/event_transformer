@@ -69,19 +69,24 @@ def train_with_config(
 ) -> None:
     """Train the model with the given configuration."""
     try:
-        # Initialize data module and model
+        # Initialize data module
         data_module = DataModule(config, test_mode=test_mode)
         
+        # Get vocabulary sizes
         config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
         config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
         
+        # Get class distribution (for imbalance handling)
+        class_distribution = data_module.get_class_distribution()
+        
+        # Initialize model with class distribution
         model = TransformerLightning(
             config, 
             config_name, 
-            class_weights=data_module.get_class_weights()
+            class_distribution=class_distribution  # Changed from class_weights
         )
 
-        # Set up logger if not in test mode
+        # Rest of your training setup remains the same...
         logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
         
         trainer = pl.Trainer(
@@ -96,22 +101,20 @@ def train_with_config(
             deterministic=True,
             enable_checkpointing=not test_mode,
             log_every_n_steps=config['training'].get('log_interval', 50),
-            fast_dev_run=test_mode,  # Automatically runs 1 batch when in test mode
-            overfit_batches=config['training'].get('overfit_batches', 0),  # For debugging
+            fast_dev_run=test_mode,
+            overfit_batches=config['training'].get('overfit_batches', 0),
         )
 
         logger.info(f"Starting training with config: {config_name}")
         trainer.fit(model, datamodule=data_module)
         
         if not test_mode:
-            # Save the final model
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)
             model_path = save_dir / f"trained_model_{config_name}_final.ckpt"
             trainer.save_checkpoint(str(model_path))
             logger.info(f"Model saved to {model_path}")
             
-            # Optionally save the best model if checkpoint callback exists
             if any(isinstance(cb, ModelCheckpoint) for cb in trainer.callbacks):
                 best_model_path = trainer.checkpoint_callback.best_model_path
                 if best_model_path:
