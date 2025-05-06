@@ -126,35 +126,48 @@ class TransformerLightning(pl.LightningModule):
         self.model = Transformer(config)
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
         self.tokenizer = LogTokenizer(
-            tokenizer_length=config['tokenizer']['tokenizer_length'], 
+            tokenizer_length=config['tokenizer']['tokenizer_length'],
             tokenizer_path=config['tokenizer']['tokenizer_path']
         )
         self.template_miner.load_state()
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        # Store class distribution as buffer
-        self.register_buffer('_class_distribution', class_distribution.float())
+        # Store class distribution (don't register as buffer yet)
+        self._class_distribution = class_distribution.float()
         
-        # Compute and register weights
-        weights = self._compute_adaptive_weights()
-        self.register_buffer('class_weights', weights)
+        # Compute weights (only register the final weights)
+        self.class_weights = self._compute_adaptive_weights()
         
         # Initialize metrics
         self._init_enhanced_metrics()
         
         # Loss function
         self.loss_fn = self._get_adaptive_focal_loss(
-            alpha=self.class_weights,
+            alpha=self.class_weights,  # Use the registered buffer
             gamma=config['training'].get('focal_gamma', 2.0),
-            label_smoothing=config['training'].get('label_smoothing', 0.4)
+            label_smoothing=config['training'].get('label_smoothing', 0.4),
+            class_distribution=self._class_distribution  # Use the non-buffer version
         )
         
+        # Training state
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []
+        
+    def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the transformer model.
+        
+        Args:
+            inputs: Input tensor of shape [batch_size, seq_len]
+            sequences: Sequence tensor of shape [batch_size, seq_len]
+            
+        Returns:
+            Logits tensor of shape [batch_size, seq_len, vocab_size]
+        """
+        return self.model(inputs, sequences)
 
-    def _compute_adaptive_weights(self) -> torch.Tensor:
-        """Compute class weights from distribution."""
+    def _compute_adaptive_weights(self):
+        """Compute weights without registering as buffer."""
         class_probs = self._class_distribution / self._class_distribution.sum()
         effective_num = 1.0 - torch.pow(0.99, self._class_distribution)
         weights = 1.0 / (effective_num + 1e-6)
@@ -163,14 +176,23 @@ class TransformerLightning(pl.LightningModule):
 
     def _init_enhanced_metrics(self):
         """Initialize metrics with rare class tracking."""
+        # Main metrics
         self.val_acc = torchmetrics.Accuracy(
             task="multiclass", 
             num_classes=self.num_classes,
             average='micro'
         )
         
-        rare_threshold = torch.quantile(self._class_distribution, 0.1)
-        self.rare_classes = torch.where(self._class_distribution < rare_threshold)[0]
+        # Weighted metrics (more focus on rare classes)
+        self.val_weighted_f1 = torchmetrics.F1Score(
+            task="multiclass",
+            num_classes=self.num_classes,
+            average='weighted'
+        )
+        
+        # Rare class tracking (bottom 10% frequency classes)
+        rare_threshold = torch.quantile(self.class_distribution, 0.1)
+        self.rare_classes = torch.where(self.class_distribution < rare_threshold)[0]
         
         self.rare_metrics = torchmetrics.MetricCollection({
             f'rare_class_{i}_f1': torchmetrics.F1Score(
@@ -180,26 +202,35 @@ class TransformerLightning(pl.LightningModule):
             ) for i in self.rare_classes
         })
 
-    def _get_adaptive_focal_loss(self, alpha, gamma, label_smoothing):
-        """Create focal loss with adaptive gamma."""
+    def _get_adaptive_focal_loss(self, alpha, gamma, label_smoothing, class_distribution):
+        """Focal loss with class-adaptive gamma and temperature."""
         class AdaptiveFocalLoss(torch.nn.Module):
-            def __init__(self, alpha, gamma, label_smoothing):
+            def __init__(self, alpha, gamma, label_smoothing, class_distribution):
                 super().__init__()
                 self.register_buffer('alpha', alpha)
-                self.gamma = gamma
+                self.base_gamma = gamma
                 self.label_smoothing = label_smoothing
                 
+                # Gamma adjustment - higher for frequent classes
+                class_freq_norm = class_distribution / class_distribution.sum()
+                self.register_buffer('gamma_adjustment', torch.log(class_freq_norm + 1e-6))
+                
             def forward(self, inputs, targets):
+                # Class-specific gamma
+                class_gamma = self.base_gamma * (1 + self.gamma_adjustment[targets])
+                
                 ce_loss = F.cross_entropy(
                     inputs, targets,
                     weight=self.alpha,
                     reduction='none',
                     label_smoothing=self.label_smoothing
                 )
+                
                 pt = torch.exp(-ce_loss)
-                return ((1 - pt) ** self.gamma * ce_loss).mean()
+                focal_loss = (1 - pt) ** class_gamma * ce_loss
+                return focal_loss.mean()
         
-        return AdaptiveFocalLoss(alpha, gamma, label_smoothing)
+        return AdaptiveFocalLoss(alpha, gamma, label_smoothing, class_distribution)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
