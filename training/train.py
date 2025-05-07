@@ -183,7 +183,7 @@ class DataModule(pl.LightningDataModule):
             dataset,
             batch_size=self.config['training']['batch_size'],
             shuffle=shuffle,
-            num_workers=self.config['dataset'].get('num_workers', 4),
+            num_workers=self.config['dataset'].get('num_workers', 1),
             pin_memory=self.config['dataset'].get('pin_memory', True),
             persistent_workers=self.config['dataset'].get('persistent_workers', True),
             prefetch_factor=2,  
@@ -231,8 +231,8 @@ class TransformerLightning(pl.LightningModule):
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
-            label_smoothing=config['training'].get('label_smoothing', 0.4),
-            reduction='mean'
+            reduction='mean',
+            num_classes=self.num_classes
         )
         
         # Training state
@@ -318,8 +318,7 @@ class TransformerLightning(pl.LightningModule):
                 outputs.append(logits_last)
 
                 with torch.no_grad():
-                    temperature = self.config['model'].get('temperature', 1.2)
-                    probs = torch.softmax(logits_last / temperature.to(device), dim=-1)
+                    probs = torch.softmax(logits_last, dim=-1)
                     preds = probs.argmax(dim=-1)
                     
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
@@ -347,12 +346,12 @@ class TransformerLightning(pl.LightningModule):
         preds = logits.argmax(dim=-1)
         
         # Update all metrics
-        self.val_acc(preds, targets)
-        self.val_precision(preds, targets)
-        self.val_recall(preds, targets)
-        self.val_f1_macro(preds, targets)
-        self.val_f1_weighted(preds, targets)
-        self.val_confmat(preds, targets)
+        self.val_acc.update(preds, targets)  # Changed from direct call to update()
+        self.val_precision.update(preds, targets)
+        self.val_recall.update(preds, targets)
+        self.val_f1_macro.update(preds, targets)
+        self.val_f1_weighted.update(preds, targets)
+        self.val_confmat.update(preds, targets)
         
         self.validation_step_outputs.append({
             'preds': preds,
@@ -365,14 +364,14 @@ class TransformerLightning(pl.LightningModule):
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
                 # Update overall important accuracy
-                self.val_important_acc(preds[important_mask], targets[important_mask])
+                self.val_important_acc.update(preds[important_mask], targets[important_mask])
                 
                 # Update per-class precision/recall
-                self.val_important_precision(preds, targets)
-                self.val_important_recall(preds, targets)
+                self.val_important_precision.update(preds, targets)
+                self.val_important_recall.update(preds, targets)
         
         return loss
-    
+
     def on_validation_epoch_end(self):
         # Compute and log metrics
         all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
@@ -385,41 +384,46 @@ class TransformerLightning(pl.LightningModule):
         top_classes = torch.topk(class_counts, 10).indices
         bottom_classes = torch.topk(class_counts, 10, largest=False).indices
         
-        # Log comprehensive metrics
-        self.log_dict({
+        # Compute all metrics first
+        metrics = {
             'val/loss': torch.stack([x['loss'] for x in self.validation_step_outputs]).mean(),
             'val/acc': self.val_acc.compute(),
             'val/precision_macro': self.val_precision.compute(),
             'val/recall_macro': self.val_recall.compute(),
             'val/f1_macro': self.val_f1_macro.compute(),
             'val/f1_weighted': self.val_f1_weighted.compute(),
-        }, prog_bar=True)
+        }
         
-        # Log class-specific metrics for top and bottom classes
+        # Convert class counts to float for logging
+        class_counts_float = class_counts.float()
+        
+        # Prepare class-specific metrics
+        class_metrics = {}
         for i in top_classes:
             if class_counts[i] > 0:
                 precision = confmat[i, i] / confmat[:, i].sum()
                 recall = confmat[i, i] / confmat[i, :].sum()
-                self.log_dict({
+                class_metrics.update({
                     f'val_top_classes/class_{i}_precision': precision,
                     f'val_top_classes/class_{i}_recall': recall,
-                    f'val_top_classes/class_{i}_support': class_counts[i]
+                    f'val_top_classes/class_{i}_support': class_counts_float[i]  # Convert to float
                 })
                 
         for i in bottom_classes:
             if class_counts[i] > 0:
                 precision = confmat[i, i] / confmat[:, i].sum()
                 recall = confmat[i, i] / confmat[i, :].sum()
-                self.log_dict({
+                class_metrics.update({
                     f'val_rare_classes/class_{i}_precision': precision,
                     f'val_rare_classes/class_{i}_recall': recall,
-                    f'val_rare_classes/class_{i}_support': class_counts[i]
+                    f'val_rare_classes/class_{i}_support': class_counts_float[i]  # Convert to float
                 })
         
         # Log important class metrics if they exist
         if len(self.important_classes) > 0:
             # Get overall important class accuracy
-            self.log('val/important_acc', self.val_important_acc.compute())
+            important_acc = self.val_important_acc.compute()
+            metrics['val/important_acc'] = important_acc
             
             # Get per-class metrics only for important classes
             precisions = self.val_important_precision.compute()
@@ -427,11 +431,18 @@ class TransformerLightning(pl.LightningModule):
             
             for i, cls in enumerate(self.important_classes):
                 cls = cls.item()
-                self.log(f'val/important_{cls}_precision', precisions[cls])
-                self.log(f'val/important_{cls}_recall', recalls[cls])
-                
-                self.log(f'val/important_{cls}_fnr', 1 - recalls[cls])
+                metrics.update({
+                    f'val/important_{cls}_precision': precisions[cls],
+                    f'val/important_{cls}_recall': recalls[cls],
+                    f'val/important_{cls}_fnr': 1 - recalls[cls]
+                })
         
+        # Log all metrics at once
+        self.log_dict(metrics, prog_bar=True)
+        self.log_dict(class_metrics)
+        
+        # Clear validation outputs and reset metrics
+        self.validation_step_outputs.clear()
         self._reset_metrics()
 
     def _reset_metrics(self):
@@ -443,7 +454,6 @@ class TransformerLightning(pl.LightningModule):
         self.val_f1_macro.reset()
         self.val_f1_weighted.reset()
         self.val_confmat.reset()
-        self.validation_step_outputs.clear()
         
         # Reset important metrics
         if len(self.important_classes) > 0:

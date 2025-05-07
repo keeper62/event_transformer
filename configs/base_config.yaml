@@ -6,15 +6,15 @@ base_config:
     # Model Hyperparameters
     model:
         vocab_size:
-        embed_dim: 512
+        embed_dim: 128
         num_heads: 8
         num_layers: 6
-        ffn_dim: 2048
+        ffn_dim: 256
         num_windows: 30          # Sliding window size for multi-head attention
-        max_len: 512
-        context_length: 10      # The # steps in the past as input
-        prediction_steps: 2      # The # steps in the future to predict
-        num_groups: 8
+        max_len: 128
+        context_length: 128      # The # steps in the past as input
+        prediction_steps: 32      # The # steps in the future to predict
+        num_groups: 6
         dropout: 0.1
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
@@ -24,8 +24,8 @@ base_config:
 
     # Training Parameters
     training:
-        num_epochs: 2
-        batch_size: 10
+        num_epochs: 10
+        batch_size: 128
         learning_rate: 0.001
         weight_decay: 0.01       # L2 regularization
         gradient_clip_val: 1.0   # Gradient clipping value
@@ -59,26 +59,26 @@ base_config:
         qkv_bias: false          # Whether to use bias in QKV projections
         out_bias: true           # Whether to use bias in output projection
         memory_efficient: true   # Use memory-efficient attention
-        chunk_size: 64          # Sequence chunk size for memory efficiency
-        inter_head_dim: 512       # Intermediate dimension for head collaboration
+        chunk_size: 32          # Sequence chunk size for memory efficiency
+        inter_head_dim: 128       # Intermediate dimension for head collaboration
         attention_dropout: 0.1   # Dropout for attention weights
 
     # Positional Encoding
     position:
         ape_class: "PositionalEncoding"  # Options: PositionalEncoding, LearnableAbsolutePosition
-        max_len: 512
+        max_len: 64
         dropout: 0.1
 
     # Decoder Settings
     decoder:
-        decoder_class: "CollaborativeAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
+        decoder_class: "MultiHeadAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
         share_attention_weights: false       # Whether to share weights between attention layers
         gradient_checkpointing: false        # Enable memory-efficient training
 
     # Dataset Settings
     dataset:
         name: "xc40"
-        path: "data/xc40/"
+        path: "data/xc40.log"
         class: "xc40_dataset"     # Dataset class name
         drain_path: "drain3_state_xc40.bin"
         num_workers: 4            # DataLoader workers
@@ -101,5 +101,5 @@ base_config:
 
     tokenizer:
         tokenizer_path: "tokenizer_state_xc40.txt"
-        tokenizer_length: 512  # Maximum sequence length for tokenization
+        tokenizer_length: 64  # Maximum sequence length for tokenization
         vocab_size:
