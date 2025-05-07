@@ -3,7 +3,7 @@ import importlib
 from typing import Optional, Dict, Any, Tuple
 import logging
 
-from models import Transformer, LogTemplateMiner, LogTokenizer, compute_class_weights
+from models import Transformer, LogTemplateMiner, LogTokenizer
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
@@ -326,6 +326,7 @@ class TransformerLightning(pl.LightningModule):
                     
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
+                    
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
                         torch.tensor(tokenized, device=device).unsqueeze(1)
@@ -428,6 +429,8 @@ class TransformerLightning(pl.LightningModule):
                 cls = cls.item()
                 self.log(f'val/important_{cls}_precision', precisions[cls])
                 self.log(f'val/important_{cls}_recall', recalls[cls])
+                
+                self.log(f'val/important_{cls}_fnr', 1 - recalls[cls])
         
         self._reset_metrics()
 
@@ -447,8 +450,7 @@ class TransformerLightning(pl.LightningModule):
             self.val_important_acc.reset()
             self.val_important_precision.reset()
             self.val_important_recall.reset()
-
-
+            
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
 
