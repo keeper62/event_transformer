@@ -30,15 +30,20 @@ class AbstractBGLDataset(Dataset, ABC):
         del self.data  # Free memory after processing
 
     def _generate_adaptive_windows(self):
-        """Generate windows with adaptive spreading based on content"""
+        """Generate windows with adaptive spreading and stride support"""
         sample_indices = []
+        
+        # Configurable parameters
+        base_stride = max(1, self.context_length // 4)  # Default stride (25% of context length)
+        min_gap = base_stride  # Minimum step between windows
+        max_gap = self.context_length // 2  # Maximum lookahead
+        similarity_threshold = 0.6  # Content similarity threshold
         
         for group_idx, (tokens, _) in enumerate(self.grouped_data):
             seq_len = len(tokens)
             total_window_size = self.context_length + self.prediction_steps
             
             if seq_len <= total_window_size:
-                # For short sequences, just take the whole sequence
                 sample_indices.append((group_idx, 0))
                 continue
                 
@@ -47,29 +52,27 @@ class AbstractBGLDataset(Dataset, ABC):
                 # Add current window
                 sample_indices.append((group_idx, pos))
                 
-                # Calculate next position based on content uniqueness
+                # Start with base stride
+                next_pos = pos + base_stride
                 current_window = tokens[pos:pos+self.context_length]
-                min_gap = 1  # Minimum step between windows
-                max_gap = self.context_length // 2  # Maximum lookahead
-                next_pos = pos + min_gap
                 
-                # Look ahead for similar content
-                for lookahead in range(min_gap, max_gap + 1):
-                    if pos + lookahead + total_window_size > seq_len:
-                        break
+                # Only do content-aware adjustment if we have room to look ahead
+                if next_pos + total_window_size <= seq_len:
+                    # Look ahead for similar content (within stride bounds)
+                    for lookahead in range(min_gap, min(max_gap, seq_len - pos - total_window_size) + 1):
+                        next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
                         
-                    next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
-                    
-                    # Calculate similarity (using unique elements for efficiency)
-                    current_set = set(current_window.tolist())
-                    next_set = set(next_window.tolist())
-                    similarity = len(current_set & next_set) / self.context_length
-                    
-                    if similarity < 0.6:  # Threshold for "different" windows
-                        next_pos = pos + lookahead
-                        break
+                        # Fast similarity check using unique elements
+                        current_unique = set(current_window.tolist())
+                        next_unique = set(next_window.tolist())
+                        similarity = len(current_unique & next_unique) / self.context_length
+                        
+                        if similarity < similarity_threshold:
+                            next_pos = pos + lookahead
+                            break
                 
-                pos = next_pos
+                # Ensure we make progress and don't get stuck
+                pos = max(pos + 1, next_pos)  # Always move forward by at least 1
                 
         return sample_indices
 
