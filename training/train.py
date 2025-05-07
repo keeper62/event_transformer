@@ -67,36 +67,44 @@ class FocalLoss(nn.Module):
             return loss.sum()
         return loss
 
+import torch
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, random_split
+from pytorch_lightning import LightningDataModule
+from typing import Dict, Any, Optional
+import importlib
+import logging
+
+logger = logging.getLogger(__name__)
+
 class DataModule(pl.LightningDataModule):
     def __init__(self, config: Dict[str, Any], test_mode: bool = False):
-        """Data module for handling dataset preparation and loading.
-        
-        Args:
-            config: Configuration dictionary
-            test_mode: If True, uses smaller dataset for testing
-        """
         super().__init__()
         self.config = config
         self.test_mode = test_mode
         self._setup_complete = False
-        self._device = None  
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.tokenizer = LogTokenizer(
+            config['tokenizer']['tokenizer_length'],
+            tokenizer_path=config['tokenizer']['tokenizer_path']
+        )
         self.template_miner.load_state()
         
-        # Dynamic dataset class loading
-        dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
-        self.dataset_class = getattr(dataset_module, "Dataset")
-        
+        # Dynamic dataset class loading with error handling
+        try:
+            dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
+            self.dataset_class = getattr(dataset_module, "Dataset")
+        except (ImportError, AttributeError) as e:
+            raise ImportError(f"Failed to load dataset class: {e}")
+
         # Initialize datasets
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
 
     def setup(self, stage: Optional[str] = None) -> None:
-        """Prepare datasets for current stage."""
         if self._setup_complete:
             return
             
@@ -111,7 +119,6 @@ class DataModule(pl.LightningDataModule):
 
         # Split dataset
         if self.test_mode:
-            # For testing, use a small subset
             test_size = min(100, len(full_dataset) // 10)
             train_size = len(full_dataset) - test_size
             self.train_dataset, self.test_dataset = random_split(
@@ -119,10 +126,9 @@ class DataModule(pl.LightningDataModule):
                 [train_size, test_size],
                 generator=torch.Generator().manual_seed(42)
             )
-            self.val_dataset = self.test_dataset  # Use test set as val in test mode
+            self.val_dataset = self.test_dataset
         else:
-            # Normal train/val split
-            val_size = min(int(0.2 * len(full_dataset)), 2500)  # Cap validation size
+            val_size = min(int(0.2 * len(full_dataset)), 2500)
             train_size = len(full_dataset) - val_size
             self.train_dataset, self.val_dataset = random_split(
                 full_dataset,
@@ -133,61 +139,8 @@ class DataModule(pl.LightningDataModule):
         self._setup_complete = True
         logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
-    @property
-    def device(self):
-        if self._device is None:
-            self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        return self._device
-
-    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 10000) -> torch.Tensor:
-        """
-        Compute class weights to handle imbalance. Supports large datasets via sampling.
-        
-        Args:
-            strategy (str): Weighting strategy:
-                - "inverse": 1 / class_count (default)
-                - "sqrt": 1 / sqrt(class_count)
-                - "balanced": (n_samples / n_classes) / class_count
-            max_samples (int): Cap on samples to process (for efficiency).
-        
-        Returns:
-            torch.Tensor: [vocab_size] tensor of class weights.
-        """
-        if not self._setup_complete:
-            self.setup()
-
-        vocab_size = self.config['model']['vocab_size']
-        counts = torch.zeros(vocab_size, dtype=torch.long)
-        
-        # Sample a subset if dataset is large
-        n_samples = min(len(self.train_dataset), max_samples)
-        indices = torch.randperm(len(self.train_dataset))[:n_samples]
-        
-        for idx in indices:
-            _, targets, _ = self.train_dataset[idx]
-            unique, counts_batch = torch.unique(targets, return_counts=True)
-            counts[unique] += counts_batch
-        
-        # Avoid division by zero for unseen classes
-        counts = counts.float() + 1e-6  # Smoothing
-        
-        # Compute weights based on strategy
-        if strategy == "inverse":
-            weights = 1.0 / counts
-        elif strategy == "sqrt":
-            weights = 1.0 / torch.sqrt(counts)
-        elif strategy == "balanced":
-            weights = (n_samples / vocab_size) / counts
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-        
-        # Normalize to sum to vocab_size (optional)
-        weights = weights * (vocab_size / weights.sum())
-        
-        return weights
-
     def _safe_collate(self, batch):
-        """Worker-safe collate that doesn't access instance attributes"""
+        """Worker-safe collate that handles both single and multi-GPU"""
         inputs, targets, seqs = zip(*batch)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         return (
@@ -195,18 +148,24 @@ class DataModule(pl.LightningDataModule):
             torch.stack(targets).to(device, non_blocking=True),
             torch.stack(seqs).to(device, non_blocking=True)
         )
-    
+
     def _create_dataloader(self, dataset, shuffle):
+        """Create dataloader with proper distributed training support"""
+        # Disable persistent workers in DDP mode
+        use_persistent = self.config['dataset'].get('persistent_workers', False)
+        if torch.distributed.is_initialized():
+            use_persistent = False
+            
         return DataLoader(
             dataset,
             batch_size=self.config['training']['batch_size'],
             shuffle=shuffle,
-            num_workers=self.config['dataset'].get('num_workers', 2),
+            num_workers=self.config['dataset'].get('num_workers', min(4, mp.cpu_count())),
             pin_memory=True,
-            persistent_workers=False,  # Disabled for spawn safety
+            persistent_workers=use_persistent,
             collate_fn=self._safe_collate,
             drop_last=shuffle,
-            multiprocessing_context=mp.get_context('spawn')  # Critical!
+            multiprocessing_context=mp.get_context('spawn') if torch.cuda.is_available() else None
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -220,6 +179,47 @@ class DataModule(pl.LightningDataModule):
             return self._create_dataloader(self.test_dataset, shuffle=False)
         return None
 
+    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 10000) -> torch.Tensor:
+        """Optimized class weight calculation with memory safety"""
+        if not self._setup_complete:
+            self.setup()
+
+        vocab_size = self.config['model']['vocab_size']
+        counts = torch.zeros(vocab_size, dtype=torch.long)
+        
+        # Use batched sampling for memory efficiency
+        batch_size = 1024
+        n_samples = min(len(self.train_dataset), max_samples)
+        indices = torch.randperm(len(self.train_dataset))[:n_samples]
+        
+        for i in range(0, len(indices), batch_size):
+            batch_indices = indices[i:i+batch_size]
+            targets = torch.cat([self.train_dataset[idx][1].unsqueeze(0) for idx in batch_indices])
+            unique, counts_batch = torch.unique(targets, return_counts=True)
+            counts[unique] += counts_batch
+
+        counts = counts.float() + 1e-6
+        
+        if strategy == "inverse":
+            weights = 1.0 / counts
+        elif strategy == "sqrt":
+            weights = 1.0 / torch.sqrt(counts)
+        elif strategy == "balanced":
+            weights = (n_samples / vocab_size) / counts
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+            
+        return (weights * (vocab_size / weights.sum())).detach()
+
+    def teardown(self, stage: Optional[str] = None) -> None:
+        """Clean up resources"""
+        if hasattr(self, 'train_dataset'):
+            del self.train_dataset
+        if hasattr(self, 'val_dataset'):
+            del self.val_dataset
+        if hasattr(self, 'test_dataset'):
+            del self.test_dataset
+        self._setup_complete = False
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, important_classes: torch.Tensor | None = None):
