@@ -26,8 +26,18 @@ class AbstractBGLDataset(Dataset, ABC):
 
         # Generate adaptive window indices for each group
         self.sample_index = self._generate_adaptive_windows()
+        
+        self._prevent_cuda_in_init()
                 
         del self.data  # Free memory after processing
+
+    def _prevent_cuda_in_init(self):
+        """Ensure no accidental CUDA calls during dataset init"""
+        if torch.cuda.is_initialized():
+            raise RuntimeError(
+                "Dataset initialized after CUDA - "
+                "move dataset creation before any GPU operations"
+            )
 
     def _generate_adaptive_windows(self):
         """Generate windows with adaptive spreading and stride support"""

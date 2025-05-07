@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import multiprocessing as mp
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean', num_classes=None):
         """
@@ -77,6 +79,7 @@ class DataModule(pl.LightningDataModule):
         self.config = config
         self.test_mode = test_mode
         self._setup_complete = False
+        self._device = None  
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
@@ -130,6 +133,12 @@ class DataModule(pl.LightningDataModule):
         self._setup_complete = True
         logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
+    @property
+    def device(self):
+        if self._device is None:
+            self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        return self._device
+
     def get_class_weights(self, strategy: str = "inverse", max_samples: int = 10000) -> torch.Tensor:
         """
         Compute class weights to handle imbalance. Supports large datasets via sampling.
@@ -177,38 +186,28 @@ class DataModule(pl.LightningDataModule):
         
         return weights
 
-    def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
-        """Create dataloader with proper device handling"""
-        # Get device in main process before workers are spawned
+    def _safe_collate(self, batch):
+        """Worker-safe collate that doesn't access instance attributes"""
+        inputs, targets, seqs = zip(*batch)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Create closure for collate_fn that captures the device
-        def collate_wrapper(batch):
-            return self._safe_collate(batch, device)
-        
+        return (
+            torch.stack(inputs).to(device, non_blocking=True),
+            torch.stack(targets).to(device, non_blocking=True),
+            torch.stack(seqs).to(device, non_blocking=True)
+        )
+    
+    def _create_dataloader(self, dataset, shuffle):
         return DataLoader(
             dataset,
             batch_size=self.config['training']['batch_size'],
             shuffle=shuffle,
             num_workers=self.config['dataset'].get('num_workers', 2),
             pin_memory=True,
-            persistent_workers=False,  # Safer for device handling
-            collate_fn=collate_wrapper,
-            drop_last=shuffle
+            persistent_workers=False,  # Disabled for spawn safety
+            collate_fn=self._safe_collate,
+            drop_last=shuffle,
+            multiprocessing_context=mp.get_context('spawn')  # Critical!
         )
-
-    def _safe_collate(self, batch, device):
-        """Device-aware collation that works in worker processes"""
-        try:
-            inputs, targets, seqs = zip(*batch)
-            return (
-                torch.stack(inputs).to(device, non_blocking=True),
-                torch.stack(targets).to(device, non_blocking=True),
-                torch.stack(seqs).to(device, non_blocking=True)
-            )
-        except Exception as e:
-            logger.error(f"Collate failed: {e}")
-            raise
 
     def train_dataloader(self) -> DataLoader:
         return self._create_dataloader(self.train_dataset, shuffle=True)

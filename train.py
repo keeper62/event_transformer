@@ -13,6 +13,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
+import multiprocessing as mp
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +73,8 @@ def train_with_config(
 ) -> None:
     """Train the model with the given configuration."""
     try:
+        mp.set_start_method('spawn', force=True)
+        
         # Initialize data module
         data_module = DataModule(config, test_mode=test_mode)
         
