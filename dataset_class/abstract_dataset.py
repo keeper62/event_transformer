@@ -20,6 +20,10 @@ class AbstractBGLDataset(Dataset, ABC):
         # Generate adaptive windows
         self.sample_index = self._generate_adaptive_windows()
 
+    def __len__(self):
+        """Returns the total number of windows"""
+        return len(self.sample_index)  # Now properly returns length
+
     def _process_data(self):
         """Process data into memory-efficient format"""
         self.group_metadata = []
