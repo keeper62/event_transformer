@@ -21,6 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+important_errors = torch.tensor([42, 101, 567, 1423, 3500, 4582], dtype=torch.long)
+
 def setup_environment(seed: int = 42) -> None:
     """Set up the training environment with reproducibility."""
     pl.seed_everything(seed, workers=True)
@@ -77,13 +79,14 @@ def train_with_config(
         config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
         
         # Get class distribution (for imbalance handling)
-        class_distribution = data_module.get_class_distribution()
+        class_weights = data_module.get_class_weights()
         
         # Initialize model with class distribution
         model = TransformerLightning(
             config, 
             config_name, 
-            class_distribution=class_distribution  # Changed from class_weights
+            class_weights=class_weights,  # Changed from class_weights
+            important_classes=important_errors
         )
 
         # Rest of your training setup remains the same...
