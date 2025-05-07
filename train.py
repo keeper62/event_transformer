@@ -13,8 +13,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
-import multiprocessing as mp
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -73,8 +71,6 @@ def train_with_config(
 ) -> None:
     """Train the model with the given configuration."""
     try:
-        mp.set_start_method('spawn', force=True)
-        
         # Initialize data module
         data_module = DataModule(config, test_mode=test_mode)
         
@@ -96,12 +92,17 @@ def train_with_config(
         # Rest of your training setup remains the same...
         logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
         
+        torch.distributed.init_process_group(
+            backend='nccl',
+            init_method='env://'
+        )
+        
         trainer = pl.Trainer(
             max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp_find_unused_parameters_false' if num_accelerators > 1 else 'auto',
+            strategy='ddp',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
             gradient_clip_val=config['training'].get('gradient_clip_val', 1.0),
@@ -132,11 +133,13 @@ def train_with_config(
         raise
 
 def main() -> None:
+    
     """Main function to parse arguments and start training."""
     parser = argparse.ArgumentParser(
         description="Train Transformer model with specified configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    
     parser.add_argument(
         "--config", 
         type=str, 
@@ -201,4 +204,6 @@ def main() -> None:
         sys.exit(1)
 
 if __name__ == "__main__":
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True)
     main()
