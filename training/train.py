@@ -178,17 +178,47 @@ class DataModule(pl.LightningDataModule):
         return weights
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
-        """Helper to create dataloaders with consistent settings."""
+        """Dataloader with automatic memory scaling"""
+        # Auto-adjust batch size based on available GPU memory
+        if torch.cuda.is_available():
+            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)  # Free memory in GB
+            max_batch = int(free_mem * 0.8 // 0.5)  # Estimate 0.5GB per batch
+            batch_size = min(
+                self.config['training']['batch_size'],
+                max(1, max_batch))
+        else:
+            batch_size = self.config['training']['batch_size']
+        
         return DataLoader(
             dataset,
-            batch_size=self.config['training']['batch_size'],
+            batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=self.config['dataset'].get('num_workers', 1),
-            pin_memory=self.config['dataset'].get('pin_memory', True),
-            persistent_workers=self.config['dataset'].get('persistent_workers', True),
-            prefetch_factor=2,  
-            drop_last=shuffle  # Only drop last for training
+            num_workers=self.config['dataset'].get('num_workers', 2),  # Reduced workers
+            pin_memory=True,
+            persistent_workers=False,  # Disabled to save memory
+            prefetch_factor=1,  # Minimal prefetch
+            drop_last=shuffle,
+            collate_fn=self._memory_safe_collate
         )
+
+    def _memory_safe_collate(self, batch):
+        """Processes batch in chunks to avoid OOM"""
+        chunk_size = min(32, len(batch))  # Process in smaller chunks
+        results = []
+        
+        for i in range(0, len(batch), chunk_size):
+            chunk = batch[i:i+chunk_size]
+            inputs, targets, seqs = zip(*chunk)
+            
+            # Process chunk
+            inputs_t = torch.stack(inputs).to(self.device)
+            targets_t = torch.stack(targets).to(self.device)
+            seqs_t = torch.stack(seqs).to(self.device)
+            
+            results.append((inputs_t, targets_t, seqs_t))
+        
+        # Concatenate chunks
+        return tuple(torch.cat(tensors) for tensors in zip(*results))
 
     def train_dataloader(self) -> DataLoader:
         return self._create_dataloader(self.train_dataset, shuffle=True)
