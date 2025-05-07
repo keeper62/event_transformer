@@ -11,83 +11,122 @@ class AbstractBGLDataset(Dataset, ABC):
         self.context_length = context_length
         self.test_mode = test_mode
         
-        self.data = self._read_data(path)  # -> list of grouped (event_id, message) lists
-
-        # Process each group into tokens + sequences
-        self.grouped_data = []
-        for group in self.data:
-            processed = [
-                (int(i), self.tokenizer(d)) for i, d in group
-            ]
-            tokens, sequences = zip(*processed)
-            sequences = torch.stack([torch.tensor(seq, dtype=torch.long) for seq in sequences])
-            tokens = torch.tensor(tokens, dtype=torch.long)
-            self.grouped_data.append((tokens, sequences))
-
-        # Generate adaptive window indices for each group
+        # Store raw data in memory-efficient format
+        self.raw_data = self._read_data(path)
+        
+        # Process into memory-friendly structures
+        self._process_data()
+        
+        # Generate adaptive windows
         self.sample_index = self._generate_adaptive_windows()
-                
-        del self.data  # Free memory after processing
+
+    def _process_data(self):
+        """Process data into memory-efficient format"""
+        self.group_metadata = []
+        self.all_tokens = []
+        self.all_sequences = []
+        
+        current_token_idx = 0
+        current_seq_idx = 0
+        
+        for group in self.raw_data:
+            # Process tokens and sequences
+            tokens = []
+            sequences = []
+            for event_id, message in group:
+                tokens.append(int(event_id))
+                sequences.append(self.tokenizer(message))
+            
+            # Store metadata
+            group_len = len(tokens)
+            self.group_metadata.append({
+                'token_start': current_token_idx,
+                'seq_start': current_seq_idx,
+                'length': group_len
+            })
+            
+            # Extend flat storage
+            self.all_tokens.extend(tokens)
+            self.all_sequences.extend(sequences)
+            
+            current_token_idx += group_len
+            current_seq_idx += group_len
+        
+        # Convert to tensors (still on CPU)
+        self.all_tokens = torch.tensor(self.all_tokens, dtype=torch.long)
+        self.all_sequences = torch.stack([torch.tensor(s, dtype=torch.long) for s in self.all_sequences])
+        
+        del self.raw_data  # Free memory
 
     def _generate_adaptive_windows(self):
-        """Generate windows with adaptive spreading and stride support"""
+        """Generate windows with stride and content-awareness"""
         sample_indices = []
+        base_stride = max(1, self.context_length // 4)
         
-        # Configurable parameters
-        base_stride = max(1, self.context_length // 4)  # Default stride (25% of context length)
-        min_gap = base_stride  # Minimum step between windows
-        max_gap = self.context_length // 2  # Maximum lookahead
-        similarity_threshold = 0.6  # Content similarity threshold
-        
-        for group_idx, (tokens, _) in enumerate(self.grouped_data):
-            seq_len = len(tokens)
+        for group_idx, meta in enumerate(self.group_metadata):
+            group_len = meta['length']
             total_window_size = self.context_length + self.prediction_steps
             
-            if seq_len <= total_window_size:
+            if group_len <= total_window_size:
                 sample_indices.append((group_idx, 0))
                 continue
                 
             pos = 0
-            while pos + total_window_size <= seq_len:
-                # Add current window
+            while pos + total_window_size <= group_len:
                 sample_indices.append((group_idx, pos))
                 
-                # Start with base stride
+                # Get current window tokens for similarity check
+                token_start = meta['token_start'] + pos
+                current_window = self.all_tokens[token_start:token_start+self.context_length]
+                
+                # Adaptive stride logic
                 next_pos = pos + base_stride
-                current_window = tokens[pos:pos+self.context_length]
+                max_possible_gap = min(self.context_length // 2, group_len - pos - total_window_size)
                 
-                # Only do content-aware adjustment if we have room to look ahead
-                if next_pos + total_window_size <= seq_len:
-                    # Look ahead for similar content (within stride bounds)
-                    for lookahead in range(min_gap, min(max_gap, seq_len - pos - total_window_size) + 1):
-                        next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
-                        
-                        # Fast similarity check using unique elements
-                        current_unique = set(current_window.tolist())
-                        next_unique = set(next_window.tolist())
-                        similarity = len(current_unique & next_unique) / self.context_length
-                        
-                        if similarity < similarity_threshold:
-                            next_pos = pos + lookahead
-                            break
+                for gap in range(base_stride, max_possible_gap + 1):
+                    check_pos = pos + gap
+                    check_start = meta['token_start'] + check_pos
+                    next_window = self.all_tokens[check_start:check_start+self.context_length]
+                    
+                    # Efficient similarity check
+                    if len(set(current_window.tolist()) & set(next_window.tolist())) / self.context_length < 0.6:
+                        next_pos = check_pos
+                        break
                 
-                # Ensure we make progress and don't get stuck
-                pos = max(pos + 1, next_pos)  # Always move forward by at least 1
+                pos = max(pos + 1, next_pos)
                 
         return sample_indices
 
-    def __len__(self):
-        return len(self.sample_index)
-
     def __getitem__(self, idx):
         group_idx, start_idx = self.sample_index[idx]
-        tokens, sequences = self.grouped_data[group_idx]
+        meta = self.group_metadata[group_idx]
         
-        input_window = tokens[start_idx : start_idx + self.context_length]
-        output_window = tokens[start_idx + self.context_length : start_idx + self.context_length + self.prediction_steps]
-        input_sequences = sequences[start_idx : start_idx + self.context_length]
-
+        # Calculate absolute positions
+        token_start = meta['token_start'] + start_idx
+        seq_start = meta['seq_start'] + start_idx
+        
+        # Extract windows (still on CPU)
+        input_window = self.all_tokens[token_start:token_start+self.context_length]
+        output_window = self.all_tokens[token_start+self.context_length:token_start+self.context_length+self.prediction_steps]
+        input_sequences = self.all_sequences[seq_start:seq_start+self.context_length]
+        
         return input_window, output_window, input_sequences
+
+    def collate_fn(self, batch):
+        """Custom collate to move only needed data to GPU"""
+        input_windows, output_windows, input_sequences = zip(*batch)
+        
+        # Stack and move to GPU in one operation
+        input_windows = torch.stack(input_windows).to(self.device)
+        output_windows = torch.stack(output_windows).to(self.device)
+        input_sequences = torch.stack(input_sequences).to(self.device)
+        
+        return input_windows, output_windows, input_sequences
+
+    @property
+    def device(self):
+        """Helper to get current device"""
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     @abstractmethod
     def _read_data(self, path):
