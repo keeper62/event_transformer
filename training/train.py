@@ -94,7 +94,7 @@ class DataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         self._setup_complete = False
         
-        self._logger = setup_logger("Hi")
+        self._logger = setup_logger(self.__class__.__name__)
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
@@ -306,7 +306,7 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self._logger = setup_logger("Ho")
+        self._logger = setup_logger(self.__class__.__name__)
         
         # Class tracking setup
         self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
@@ -484,6 +484,7 @@ class TransformerLightning(pl.LightningModule):
     def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
         """Debug helper to check tensor devices"""
         devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
+        self._logger.debug("Devices: ", {t.device for t in tensors if isinstance(t, torch.Tensor)})
         if len(devices) > 1:
             error_msg = f"Device mismatch detected. Found devices: {devices}\n"
             error_msg += "Tensor details:\n"
