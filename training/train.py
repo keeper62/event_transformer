@@ -33,7 +33,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -496,7 +496,6 @@ class TransformerLightning(pl.LightningModule):
         inputs, targets, sequences = batch
         
         # Debug device consistency
-        self._validate_device_consistency(inputs, targets, sequences)
         self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
         
         device = inputs.device
@@ -507,7 +506,6 @@ class TransformerLightning(pl.LightningModule):
             current_sequences = sequences.clone()
 
             for step in range(self.model.n_steps):
-                self._logger.debug(f"Step {step} shapes - current_inputs: {current_inputs.shape}, current_sequences: {current_sequences.shape}")
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
@@ -516,8 +514,6 @@ class TransformerLightning(pl.LightningModule):
                     probs = torch.softmax(logits_last, dim=-1)
                     preds = probs.argmax(dim=-1)
                     
-                    self._logger.debug(f"Prediction shapes - probs: {probs.shape}, preds: {preds.shape}")
-                    
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
                     
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
@@ -525,8 +521,6 @@ class TransformerLightning(pl.LightningModule):
                     
                     # Debug the new sequence tensor
                     new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
-                    self._validate_device_consistency(current_sequences, new_sequence)
-                    self._logger.debug(f"New sequence shape: {new_sequence.shape}")
                     
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
