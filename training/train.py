@@ -240,7 +240,10 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        return self.model(inputs, sequences)
+        logger.info(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        output = self.model(inputs, sequences)
+        logger.info(f"Model output shape: {output.shape}")
+        return output
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -320,6 +323,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Debug device consistency
         self._validate_device_consistency(inputs, targets, sequences)
+        logger.info(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
         
         device = inputs.device
         outputs = []
@@ -329,6 +333,7 @@ class TransformerLightning(pl.LightningModule):
             current_sequences = sequences.clone()
 
             for step in range(self.model.n_steps):
+                logger.info(f"Step {step} shapes - current_inputs: {current_inputs.shape}, current_sequences: {current_sequences.shape}")
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
@@ -336,6 +341,8 @@ class TransformerLightning(pl.LightningModule):
                 with torch.no_grad():
                     probs = torch.softmax(logits_last, dim=-1)
                     preds = probs.argmax(dim=-1)
+                    
+                    logger.info(f"Prediction shapes - probs: {probs.shape}, preds: {preds.shape}")
                     
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
                     
@@ -345,6 +352,7 @@ class TransformerLightning(pl.LightningModule):
                     # Debug the new sequence tensor
                     new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
                     self._validate_device_consistency(current_sequences, new_sequence)
+                    logger.info(f"New sequence shape: {new_sequence.shape}")
                     
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
@@ -352,6 +360,11 @@ class TransformerLightning(pl.LightningModule):
                     ], dim=1)
 
         outputs = torch.stack(outputs, dim=1).float()
+        final_outputs = outputs.reshape(-1, self.num_classes)
+        final_targets = targets.reshape(-1)
+        
+        logger.info(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
+        
         final_targets = targets.reshape(-1)
         
         # Final device check before return
