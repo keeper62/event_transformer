@@ -26,16 +26,14 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.handlers.clear()
     logger.propagate = False  # Critical for PL compatibility
     
-    if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only
-        logger.setLevel(logging.DEBUG)
-        
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only    
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.DEBUG)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -545,7 +543,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Final device check before return
         self._validate_device_consistency(outputs, final_targets)
-        return outputs, final_targets
+        return outputs.to(device), final_targets.to(device)
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
