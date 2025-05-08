@@ -13,34 +13,31 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
-# Configure logging
 def setup_logger(name: str | None = None) -> logging.Logger:
-    """Setup logger that only logs on the main process."""
+    """Setup logger that works with PyTorch Lightning."""
     logger = logging.getLogger(name or __name__)
     
-    # Only add handlers if not already added and we're on the main process
-    if not logger.handlers:
+    # Clear existing configuration
+    logger.handlers.clear()
+    logger.propagate = False  # Critical for PL compatibility
+    
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only
         logger.setLevel(logging.DEBUG)
         
-        # Check if we're in a distributed environment and are the main process
-        rank_key = os.environ.get("LOCAL_RANK", "0")
-        is_main_process = rank_key == "0"
+        formatter = logging.Formatter(
+            '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
         
-        if is_main_process:
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        else:
-            # Add null handler to prevent "No handlers found" warnings
-            logger.addHandler(logging.NullHandler())
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     
     return logger
 
 # Usage:
-logger = setup_logger()
+logger = setup_logger(__name__)
 
 important_errors = torch.tensor([42, 101, 567, 1423, 3500, 4582], dtype=torch.long)
 
@@ -108,7 +105,8 @@ def train_with_config(
             config, 
             config_name, 
             class_weights=class_weights,  # Changed from class_weights
-            important_classes=important_errors
+            important_classes=important_errors,
+            logger = logger
         )
 
         # Rest of your training setup remains the same...

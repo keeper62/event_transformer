@@ -3,7 +3,30 @@ import torch
 from torch.utils.data import Dataset
 import logging
 
-logger = logging.getLogger(__name__)
+import os
+
+def setup_logger(name: str | None = None) -> logging.Logger:
+    """Setup logger that works with PyTorch Lightning."""
+    logger = logging.getLogger(name or __name__)
+    
+    # Clear existing configuration
+    logger.handlers.clear()
+    logger.propagate = False  # Critical for PL compatibility
+    
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only
+        logger.setLevel(logging.DEBUG)
+        
+        formatter = logging.Formatter(
+            '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    return logger
 
 class AbstractBGLDataset(Dataset, ABC):
     def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False):
@@ -13,6 +36,8 @@ class AbstractBGLDataset(Dataset, ABC):
         self.prediction_steps = prediction_steps
         self.context_length = context_length
         self.test_mode = test_mode
+        
+        self.logger = setup_logger(self.__class__.__name__)
         
         # Read and process data
         self.data = self._read_data(path)  # list of grouped (event_id, message) lists
@@ -50,7 +75,7 @@ class AbstractBGLDataset(Dataset, ABC):
                 processed_groups.append((token_tensor, seq_tensor))
                 
             except Exception as e:
-                logger.debug(f"Error processing group {group_idx}: {str(e)}")
+                self.logger.error(f"Error processing group {group_idx}: {str(e)}")
                 raise
                 
         return processed_groups
@@ -59,7 +84,7 @@ class AbstractBGLDataset(Dataset, ABC):
         """Generate windows with shape validation"""
         sample_indices = []
         total_window_size = self.context_length + self.prediction_steps
-        logger.debug(f"Generating windows with context_length={self.context_length}, "
+        self.logger.debug(f"Generating windows with context_length={self.context_length}, "
               f"prediction_steps={self.prediction_steps}, "
               f"total_window_size={total_window_size}")
 
@@ -68,7 +93,7 @@ class AbstractBGLDataset(Dataset, ABC):
             
             if seq_len <= total_window_size:
                 if seq_len < total_window_size:
-                    logger.debug(f"Warning: Group {group_idx} length {seq_len} < required window size {total_window_size}")
+                    self.logger.warning(f"Warning: Group {group_idx} length {seq_len} < required window size {total_window_size}")
                 sample_indices.append((group_idx, 0))
                 continue
                 
@@ -76,23 +101,18 @@ class AbstractBGLDataset(Dataset, ABC):
             while pos + total_window_size <= seq_len:
                 # Validate window bounds
                 if pos + total_window_size > seq_len:
-                    logger.debug(f"Invalid window bounds: pos={pos}, seq_len={seq_len}, window_size={total_window_size}")
+                    self.logger.warning(f"Invalid window bounds: pos={pos}, seq_len={seq_len}, window_size={total_window_size}")
                     break
                     
                 sample_indices.append((group_idx, pos))
                 pos += max(1, self.context_length // 4)  # Simplified stride for debugging
 
-        print(f"Generated {len(sample_indices)} windows total")
+        self.logger.debug(f"Generated {len(sample_indices)} windows total")
         return sample_indices
 
     def __getitem__(self, idx: int):
         group_idx, start_idx = self.sample_index[idx]
         tokens, sequences = self.grouped_data[group_idx]
-        
-        # Debug before slicing
-        logger.debug(f"\nSample {idx} from group {group_idx}:")
-        logger.debug(f"Original tokens length: {len(tokens)}")
-        logger.debug(f"Start index: {start_idx}, context_length: {self.context_length}, prediction_steps: {self.prediction_steps}")
 
         # Slice windows with bounds checking
         input_end = start_idx + self.context_length
@@ -108,11 +128,6 @@ class AbstractBGLDataset(Dataset, ABC):
         input_window = tokens[start_idx:input_end]
         output_window = tokens[input_end:output_end]
         input_sequences = sequences[start_idx:input_end]
-        
-        # Debug output shapes
-        logger.debug(f"Shapes - input_window: {input_window.shape}, "
-              f"output_window: {output_window.shape}, "
-              f"input_sequences: {input_sequences.shape}")
         
         return input_window, output_window, input_sequences
 
