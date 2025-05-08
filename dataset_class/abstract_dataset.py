@@ -3,14 +3,13 @@ import torch
 from torch.utils.data import Dataset
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False, device: torch.device | None = None):
+    def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False):
         self.path = path
         self.template_miner = template_miner
         self.tokenizer = tokenizer
         self.prediction_steps = prediction_steps
         self.context_length = context_length
         self.test_mode = test_mode
-        self.device = device or torch.device('cpu')
         
         # Read and process data
         self.data = self._read_data(path)  # list of grouped (event_id, message) lists
@@ -35,11 +34,10 @@ class AbstractBGLDataset(Dataset, ABC):
             token_tensor = torch.tensor(
                 tokens, 
                 dtype=torch.long,  # More efficient than int16 for modern GPUs
-                device=self.device
             )
             
             seq_tensor = torch.stack([
-                torch.tensor(seq, dtype=torch.long, device=self.device)
+                torch.tensor(seq, dtype=torch.long)
                 for seq in sequences
             ])
             
