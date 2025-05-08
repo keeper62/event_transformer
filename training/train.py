@@ -178,19 +178,6 @@ class DataModule(pl.LightningDataModule):
         
         return weights.to(self.device)  # Ensure weights are on correct device
 
-    def _device_aware_collate(self, batch):
-        """Custom collate function that ensures all tensors are on the correct device."""
-        elem = batch[0]
-        if isinstance(elem, (tuple, list)):
-            transposed = zip(*batch)
-            return [self._device_aware_collate(samples) for samples in transposed]
-        elif isinstance(elem, dict):
-            return {key: self._device_aware_collate([d[key] for d in batch]) for key in elem}
-        elif isinstance(elem, torch.Tensor):
-            return torch.utils.data.default_collate(batch).to(self.device)
-        else:
-            return torch.utils.data.default_collate(batch)
-
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
         """Helper to create dataloaders with consistent settings."""
         return DataLoader(
@@ -201,7 +188,6 @@ class DataModule(pl.LightningDataModule):
             pin_memory=self.config['dataset'].get('pin_memory', True),
             persistent_workers=self.config['dataset'].get('persistent_workers', True),
             prefetch_factor=2,
-            collate_fn=self._device_aware_collate,  # Use our device-aware collate
             drop_last=shuffle  # Only drop last for training
         )
 
