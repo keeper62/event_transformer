@@ -80,7 +80,8 @@ class DataModule(pl.LightningDataModule):
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], 
+                                    tokenizer_path=config['tokenizer']['tokenizer_path'])
         self.template_miner.load_state()
         
         # Dynamic dataset class loading
@@ -175,7 +176,20 @@ class DataModule(pl.LightningDataModule):
         # Normalize to sum to vocab_size (optional)
         weights = weights * (vocab_size / weights.sum())
         
-        return weights
+        return weights.to(self.device)  # Ensure weights are on correct device
+
+    def _device_aware_collate(self, batch):
+        """Custom collate function that ensures all tensors are on the correct device."""
+        elem = batch[0]
+        if isinstance(elem, (tuple, list)):
+            transposed = zip(*batch)
+            return [self._device_aware_collate(samples) for samples in transposed]
+        elif isinstance(elem, dict):
+            return {key: self._device_aware_collate([d[key] for d in batch]) for key in elem}
+        elif isinstance(elem, torch.Tensor):
+            return torch.utils.data.default_collate(batch).to(self.device)
+        else:
+            return torch.utils.data.default_collate(batch)
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
         """Helper to create dataloaders with consistent settings."""
@@ -186,7 +200,8 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.config['dataset'].get('num_workers', 1),
             pin_memory=self.config['dataset'].get('pin_memory', True),
             persistent_workers=self.config['dataset'].get('persistent_workers', True),
-            prefetch_factor=2,  
+            prefetch_factor=2,
+            collate_fn=self._device_aware_collate,  # Use our device-aware collate
             drop_last=shuffle  # Only drop last for training
         )
 
@@ -201,6 +216,10 @@ class DataModule(pl.LightningDataModule):
             return self._create_dataloader(self.test_dataset, shuffle=False)
         return None
 
+    @property
+    def device(self) -> torch.device:
+        """Helper property to get the current device."""
+        return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, important_classes: torch.Tensor | None = None):
@@ -218,33 +237,54 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long)
+        # Device-aware initialization
+        self.important_classes = self._init_important_classes(important_classes)
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
         
         self.class_weights = self._adjust_class_weights(class_weights)
         self._init_important_metrics()
         
-        # Initialize metrics
+        # Initialize metrics (now device-aware)
         self._init_metrics()
         
-        # Loss function
-        self.loss_fn = FocalLoss(
-            alpha=self.class_weights,
-            gamma=config['training'].get('focal_gamma', 2.0),
-            reduction='mean',
-            num_classes=self.num_classes
-        )
+        # Loss function will be initialized in setup()
+        self.loss_fn = None
         
         # Training state
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []
         
+    def _init_important_classes(self, important_classes: torch.Tensor | None) -> torch.Tensor:
+        """Initialize important classes tensor with device awareness"""
+        if important_classes is None:
+            return torch.tensor([], dtype=torch.long, device=self.device)
+        return important_classes.long().to(self.device)
+    
+    def setup(self, stage: str) -> None:
+        """Initialize components that need device placement"""
+        # Initialize loss function with proper device placement
+        self.loss_fn = FocalLoss(
+            alpha=self.class_weights.to(self.device),
+            gamma=self.hparams.config['training'].get('focal_gamma', 2.0),
+            reduction='mean',
+            num_classes=self.num_classes
+        )
+        
+        # Ensure all metrics are on the correct device
+        self._move_metrics_to_device()
+    
+    def _move_metrics_to_device(self) -> None:
+        """Ensure all metrics are on the correct device"""
+        for name, metric in self.named_children():
+            if isinstance(metric, torchmetrics.Metric):
+                metric.to(self.device)
+    
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(inputs, sequences)
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
-        """Boost weights for important classes (tensor version)"""
-        adjusted_weights = original_weights.clone()
+        """Boost weights for important classes with device awareness"""
+        adjusted_weights = original_weights.clone().to(self.device)
         if len(self.important_classes) > 0:
             # Ensure we don't try to boost classes beyond the weight vector length
             valid_mask = self.important_classes < len(adjusted_weights)
@@ -253,13 +293,13 @@ class TransformerLightning(pl.LightningModule):
         return adjusted_weights
 
     def _init_metrics(self):
-        """Initialize metrics with better handling for multi-class scenario."""
+        """Initialize metrics with device awareness"""
         # Main metrics - using macro average which is better for imbalanced classes
         self.val_acc = torchmetrics.Accuracy(
             task="multiclass", 
             num_classes=self.num_classes,
             average='micro'
-        )
+        ).to(self.device)
         
         # Precision and Recall with macro average
         self.val_precision = torchmetrics.Precision(
@@ -267,47 +307,62 @@ class TransformerLightning(pl.LightningModule):
             num_classes=self.num_classes,
             average='weighted',
             ignore_index=-1  # Ignore padding if any
-        )
+        ).to(self.device)
         
         self.val_recall = torchmetrics.Recall(
             task="multiclass",
             num_classes=self.num_classes,
             average='weighted',
             ignore_index=-1
-        )
+        ).to(self.device)
         
-        # F1 scores - both macro and weighted
+        # F1 scores
         self.val_f1_macro = torchmetrics.F1Score(
             task="multiclass",
             num_classes=self.num_classes,
             average='macro'
-        )
+        ).to(self.device)
         
         self.val_f1_weighted = torchmetrics.F1Score(
             task="multiclass",
             num_classes=self.num_classes,
             average='weighted'
-        )
+        ).to(self.device)
         
         # For class distribution analysis
         self.val_confmat = torchmetrics.ConfusionMatrix(
             task="multiclass",
             num_classes=self.num_classes,
             normalize='true'
-        )
+        ).to(self.device)
         
     def _init_important_metrics(self):
-        """Initialize only the important-class-specific metrics"""
-        # Using separate metric objects for cleaner reset
-        self.val_important_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes)
-        self.val_important_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='none')
-        self.val_important_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='none')
+        """Initialize only the important-class-specific metrics with device awareness"""
+        self.val_important_acc = torchmetrics.Accuracy(
+            task="multiclass", 
+            num_classes=self.num_classes
+        ).to(self.device)
+        
+        self.val_important_precision = torchmetrics.Precision(
+            task="multiclass", 
+            num_classes=self.num_classes, 
+            average='none'
+        ).to(self.device)
+        
+        self.val_important_recall = torchmetrics.Recall(
+            task="multiclass", 
+            num_classes=self.num_classes, 
+            average='none'
+        ).to(self.device)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         device = inputs.device
+        
+        # Validate device consistency
+        self._validate_device_consistency(inputs, targets, sequences)
+        
         outputs = []
-
         with torch.amp.autocast(device_type=device.type, enabled=self.hparams.config['training'].get('mixed_precision', True)):
             current_inputs = inputs.clone()
             current_sequences = sequences.clone()
@@ -333,11 +388,17 @@ class TransformerLightning(pl.LightningModule):
 
         outputs = torch.stack(outputs, dim=1).float()
         return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
+    
+    def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
+        """Validate all tensors are on the same device"""
+        devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
+        if len(devices) > 1:
+            raise RuntimeError(f"Device mismatch detected. Found devices: {devices}")
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
+        self.log("train/loss", loss, prog_bar=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
@@ -346,27 +407,29 @@ class TransformerLightning(pl.LightningModule):
         preds = logits.argmax(dim=-1)
         
         # Update all metrics
-        self.val_acc.update(preds, targets)  # Changed from direct call to update()
-        self.val_precision.update(preds, targets)
-        self.val_recall.update(preds, targets)
-        self.val_f1_macro.update(preds, targets)
-        self.val_f1_weighted.update(preds, targets)
-        self.val_confmat.update(preds, targets)
+        metrics_to_update = {
+            'val_acc': (preds, targets),
+            'val_precision': (preds, targets),
+            'val_recall': (preds, targets),
+            'val_f1_macro': (preds, targets),
+            'val_f1_weighted': (preds, targets),
+            'val_confmat': (preds, targets)
+        }
+        
+        for metric_name, (p, t) in metrics_to_update.items():
+            getattr(self, metric_name).update(p, t)
         
         self.validation_step_outputs.append({
-            'preds': preds,
-            'targets': targets,
-            'loss': loss
+            'preds': preds.detach(),
+            'targets': targets.detach(),
+            'loss': loss.detach()
         })
         
-        # Only update important class metrics if they exist
+        # Important class metrics
         if len(self.important_classes) > 0:
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
-                # Update overall important accuracy
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
-                
-                # Update per-class precision/recall
                 self.val_important_precision.update(preds, targets)
                 self.val_important_recall.update(preds, targets)
         
@@ -374,7 +437,7 @@ class TransformerLightning(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         # Compute and log metrics
-        all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
+        all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs]).to(self.device)
         
         # Compute confusion matrix and get class-wise metrics
         confmat = self.val_confmat.compute()
@@ -394,9 +457,6 @@ class TransformerLightning(pl.LightningModule):
             'val/f1_weighted': self.val_f1_weighted.compute(),
         }
         
-        # Convert class counts to float for logging
-        class_counts_float = class_counts.float()
-        
         # Prepare class-specific metrics
         class_metrics = {}
         for i in top_classes:
@@ -406,7 +466,7 @@ class TransformerLightning(pl.LightningModule):
                 class_metrics.update({
                     f'val_top_classes/class_{i}_precision': precision,
                     f'val_top_classes/class_{i}_recall': recall,
-                    f'val_top_classes/class_{i}_support': class_counts_float[i]  # Convert to float
+                    f'val_top_classes/class_{i}_support': class_counts[i].float()
                 })
                 
         for i in bottom_classes:
@@ -416,20 +476,18 @@ class TransformerLightning(pl.LightningModule):
                 class_metrics.update({
                     f'val_rare_classes/class_{i}_precision': precision,
                     f'val_rare_classes/class_{i}_recall': recall,
-                    f'val_rare_classes/class_{i}_support': class_counts_float[i]  # Convert to float
+                    f'val_rare_classes/class_{i}_support': class_counts[i].float()
                 })
         
-        # Log important class metrics if they exist
+        # Important class metrics
         if len(self.important_classes) > 0:
-            # Get overall important class accuracy
             important_acc = self.val_important_acc.compute()
             metrics['val/important_acc'] = important_acc
             
-            # Get per-class metrics only for important classes
             precisions = self.val_important_precision.compute()
             recalls = self.val_important_recall.compute()
             
-            for i, cls in enumerate(self.important_classes):
+            for cls in self.important_classes:
                 cls = cls.item()
                 metrics.update({
                     f'val/important_{cls}_precision': precisions[cls],
@@ -437,30 +495,14 @@ class TransformerLightning(pl.LightningModule):
                     f'val/important_{cls}_fnr': 1 - recalls[cls]
                 })
         
-        # Log all metrics at once
+        # Log all metrics
         self.log_dict(metrics, prog_bar=True)
         self.log_dict(class_metrics)
         
-        # Clear validation outputs and reset metrics
+        # Clear outputs and reset metrics
         self.validation_step_outputs.clear()
         self._reset_metrics()
 
-    def _reset_metrics(self):
-        """Reset both regular and important metrics"""
-        # Reset all metrics
-        self.val_acc.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
-        self.val_f1_macro.reset()
-        self.val_f1_weighted.reset()
-        self.val_confmat.reset()
-        
-        # Reset important metrics
-        if len(self.important_classes) > 0:
-            self.val_important_acc.reset()
-            self.val_important_precision.reset()
-            self.val_important_recall.reset()
-            
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
 
