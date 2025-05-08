@@ -184,6 +184,65 @@ class DataModule(pl.LightningDataModule):
             drop_last=shuffle
         )
 
+    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 10000) -> torch.Tensor:
+        """
+        Compute class weights to handle imbalance. Supports large datasets via sampling.
+        
+        Args:
+            strategy (str): Weighting strategy:
+                - "inverse": 1 / class_count (default)
+                - "sqrt": 1 / sqrt(class_count)
+                - "balanced": (n_samples / n_classes) / class_count
+            max_samples (int): Cap on samples to process (for efficiency).
+        
+        Returns:
+            torch.Tensor: [vocab_size] tensor of class weights.
+        """
+        if not self._setup_complete:
+            self.setup()
+
+        vocab_size = self.config['model']['vocab_size']
+        counts = torch.zeros(vocab_size, dtype=torch.long)
+        
+        # Sample a subset if dataset is large
+        n_samples = min(len(self.train_dataset), max_samples)
+        indices = torch.randperm(len(self.train_dataset))[:n_samples]
+        
+        for idx in indices:
+            _, targets, _ = self.train_dataset[idx]
+            unique, counts_batch = torch.unique(targets, return_counts=True)
+            counts[unique] += counts_batch
+        
+        # Avoid division by zero for unseen classes
+        counts = counts.float() + 1e-6  # Smoothing
+        
+        # Compute weights based on strategy
+        if strategy == "inverse":
+            weights = 1.0 / counts
+        elif strategy == "sqrt":
+            weights = 1.0 / torch.sqrt(counts)
+        elif strategy == "balanced":
+            weights = (n_samples / vocab_size) / counts
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+        
+        # Normalize to sum to vocab_size (optional)
+        weights = weights * (vocab_size / weights.sum())
+        
+        return weights
+
+    def train_dataloader(self) -> DataLoader:
+        return self._create_dataloader(self.train_dataset, shuffle=True)
+
+    def val_dataloader(self) -> DataLoader:
+        return self._create_dataloader(self.val_dataset, shuffle=False)
+
+    def test_dataloader(self) -> Optional[DataLoader]:
+        if self.test_dataset:
+            return self._create_dataloader(self.test_dataset, shuffle=False)
+        return None
+
+
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, important_classes: torch.Tensor | None = None):
         super().__init__()
