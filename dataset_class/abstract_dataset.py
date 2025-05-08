@@ -22,6 +22,12 @@ class AbstractBGLDataset(Dataset, ABC):
         # Cleanup
         del self.data
 
+    def __len__(self) -> int:
+        """Returns the number of samples in the dataset"""
+        if not hasattr(self, 'sample_index'):
+            return 0
+        return len(self.sample_index)
+
     def _process_groups(self):
         """Process raw data groups into tensors with shape validation"""
         processed_groups = []
