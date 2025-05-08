@@ -218,7 +218,7 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long)
+        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
         
         self.class_weights = self._adjust_class_weights(class_weights)
