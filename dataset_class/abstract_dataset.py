@@ -3,45 +3,63 @@ import torch
 from torch.utils.data import Dataset
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False):
+    def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False, device: torch.device | None = None):
         self.path = path
         self.template_miner = template_miner
         self.tokenizer = tokenizer
         self.prediction_steps = prediction_steps
         self.context_length = context_length
         self.test_mode = test_mode
+        self.device = device or torch.device('cpu')
         
-        self.data = self._read_data(path)  # -> list of grouped (event_id, message) lists
-
-        # Process each group into tokens + sequences
-        self.grouped_data = []
-        for group in self.data:
-            processed = [
-                (int(i), self.tokenizer(d)) for i, d in group
-            ]
-            tokens, sequences = zip(*processed)
-            sequences = torch.stack([torch.tensor(seq, dtype=torch.torch.int16) for seq in sequences])
-            tokens = torch.tensor(tokens, dtype=torch.torch.int16)
-            self.grouped_data.append((tokens, sequences))
-
-        # Generate adaptive window indices for each group
+        # Read and process data
+        self.data = self._read_data(path)  # list of grouped (event_id, message) lists
+        self.grouped_data = self._process_groups()
         self.sample_index = self._generate_adaptive_windows()
-                
-        del self.data  # Free memory after processing
+        
+        # Cleanup
+        del self.data
+
+    def _process_groups(self):
+        """Process raw data groups into device-aware tensors."""
+        processed_groups = []
+        
+        for group in self.data:
+            # Process tokens and sequences
+            tokens, sequences = zip(*[
+                (int(event_id), self.tokenizer(message)) 
+                for event_id, message in group
+            ])
+            
+            # Convert to tensors and move to device
+            token_tensor = torch.tensor(
+                tokens, 
+                dtype=torch.int32,  # More efficient than int16 for modern GPUs
+                device=self.device
+            )
+            
+            seq_tensor = torch.stack([
+                torch.tensor(seq, dtype=torch.int32, device=self.device)
+                for seq in sequences
+            ])
+            
+            processed_groups.append((token_tensor, seq_tensor))
+            
+        return processed_groups
 
     def _generate_adaptive_windows(self):
-        """Generate windows with adaptive spreading and stride support"""
+        """Generate windows with adaptive spreading and stride support."""
         sample_indices = []
         
         # Configurable parameters
-        base_stride = max(1, self.context_length // 4)  # Default stride (25% of context length)
-        min_gap = base_stride  # Minimum step between windows
-        max_gap = self.context_length // 2  # Maximum lookahead
-        similarity_threshold = 0.6  # Content similarity threshold
+        base_stride = max(1, self.context_length // 4)
+        min_gap = base_stride
+        max_gap = self.context_length // 2
+        similarity_threshold = 0.6
+        total_window_size = self.context_length + self.prediction_steps
         
         for group_idx, (tokens, _) in enumerate(self.grouped_data):
             seq_len = len(tokens)
-            total_window_size = self.context_length + self.prediction_steps
             
             if seq_len <= total_window_size:
                 sample_indices.append((group_idx, 0))
@@ -49,44 +67,50 @@ class AbstractBGLDataset(Dataset, ABC):
                 
             pos = 0
             while pos + total_window_size <= seq_len:
-                # Add current window
                 sample_indices.append((group_idx, pos))
+                current_window = tokens[pos:pos+self.context_length]
                 
                 # Start with base stride
                 next_pos = pos + base_stride
-                current_window = tokens[pos:pos+self.context_length]
                 
-                # Only do content-aware adjustment if we have room to look ahead
+                # Content-aware adjustment if possible
                 if next_pos + total_window_size <= seq_len:
-                    # Look ahead for similar content (within stride bounds)
+                    current_unique = torch.unique(current_window)
+                    
                     for lookahead in range(min_gap, min(max_gap, seq_len - pos - total_window_size) + 1):
                         next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
+                        next_unique = torch.unique(next_window)
                         
-                        # Fast similarity check using unique elements
-                        current_unique = set(current_window.tolist())
-                        next_unique = set(next_window.tolist())
-                        similarity = len(current_unique & next_unique) / self.context_length
+                        # Use torch's intersect for GPU efficiency
+                        similarity = len(torch.intersect1d(
+                            current_unique, 
+                            next_unique,
+                            return_counts=False
+                        )) / self.context_length
                         
                         if similarity < similarity_threshold:
                             next_pos = pos + lookahead
                             break
                 
-                # Ensure we make progress and don't get stuck
-                pos = max(pos + 1, next_pos)  # Always move forward by at least 1
+                pos = max(pos + 1, next_pos)
                 
         return sample_indices
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.sample_index)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         group_idx, start_idx = self.sample_index[idx]
         tokens, sequences = self.grouped_data[group_idx]
         
-        input_window = tokens[start_idx : start_idx + self.context_length]
-        output_window = tokens[start_idx + self.context_length : start_idx + self.context_length + self.prediction_steps]
-        input_sequences = sequences[start_idx : start_idx + self.context_length]
-
+        # Slice windows
+        input_end = start_idx + self.context_length
+        output_end = input_end + self.prediction_steps
+        
+        input_window = tokens[start_idx:input_end]
+        output_window = tokens[input_end:output_end]
+        input_sequences = sequences[start_idx:input_end]
+        
         return input_window, output_window, input_sequences
 
     @abstractmethod
