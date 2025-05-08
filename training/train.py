@@ -67,12 +67,6 @@ class FocalLoss(nn.Module):
 
 class DataModule(pl.LightningDataModule):
     def __init__(self, config: Dict[str, Any], test_mode: bool = False):
-        """Data module for handling dataset preparation and loading.
-        
-        Args:
-            config: Configuration dictionary
-            test_mode: If True, uses smaller dataset for testing
-        """
         super().__init__()
         self.config = config
         self.test_mode = test_mode
@@ -80,7 +74,10 @@ class DataModule(pl.LightningDataModule):
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], tokenizer_path=config['tokenizer']['tokenizer_path'])
+        self.tokenizer = LogTokenizer(
+            config['tokenizer']['tokenizer_length'], 
+            tokenizer_path=config['tokenizer']['tokenizer_path']
+        )
         self.template_miner.load_state()
         
         # Dynamic dataset class loading
@@ -93,9 +90,11 @@ class DataModule(pl.LightningDataModule):
         self.test_dataset = None
 
     def setup(self, stage: Optional[str] = None) -> None:
-        """Prepare datasets for current stage."""
         if self._setup_complete:
             return
+            
+        logger.info(f"Initializing dataset with context_length={self.config['model']['context_length']} "
+                   f"and prediction_steps={self.config['model']['prediction_steps']}")
             
         full_dataset = self.dataset_class(
             path=self.config['dataset']['path'],
@@ -106,9 +105,11 @@ class DataModule(pl.LightningDataModule):
             test_mode=self.test_mode
         )
 
+        # Validate dataset samples
+        self._validate_dataset_shapes(full_dataset)
+
         # Split dataset
         if self.test_mode:
-            # For testing, use a small subset
             test_size = min(100, len(full_dataset) // 10)
             train_size = len(full_dataset) - test_size
             self.train_dataset, self.test_dataset = random_split(
@@ -116,10 +117,9 @@ class DataModule(pl.LightningDataModule):
                 [train_size, test_size],
                 generator=torch.Generator().manual_seed(42)
             )
-            self.val_dataset = self.test_dataset  # Use test set as val in test mode
+            self.val_dataset = self.test_dataset
         else:
-            # Normal train/val split
-            val_size = min(int(0.2 * len(full_dataset)), 2500)  # Cap validation size
+            val_size = min(int(0.2 * len(full_dataset)), 2500)
             train_size = len(full_dataset) - val_size
             self.train_dataset, self.val_dataset = random_split(
                 full_dataset,
@@ -130,55 +130,48 @@ class DataModule(pl.LightningDataModule):
         self._setup_complete = True
         logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
-    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 10000) -> torch.Tensor:
-        """
-        Compute class weights to handle imbalance. Supports large datasets via sampling.
-        
-        Args:
-            strategy (str): Weighting strategy:
-                - "inverse": 1 / class_count (default)
-                - "sqrt": 1 / sqrt(class_count)
-                - "balanced": (n_samples / n_classes) / class_count
-            max_samples (int): Cap on samples to process (for efficiency).
-        
-        Returns:
-            torch.Tensor: [vocab_size] tensor of class weights.
-        """
-        if not self._setup_complete:
-            self.setup()
-
-        vocab_size = self.config['model']['vocab_size']
-        counts = torch.zeros(vocab_size, dtype=torch.long)
-        
-        # Sample a subset if dataset is large
-        n_samples = min(len(self.train_dataset), max_samples)
-        indices = torch.randperm(len(self.train_dataset))[:n_samples]
-        
-        for idx in indices:
-            _, targets, _ = self.train_dataset[idx]
-            unique, counts_batch = torch.unique(targets, return_counts=True)
-            counts[unique] += counts_batch
-        
-        # Avoid division by zero for unseen classes
-        counts = counts.float() + 1e-6  # Smoothing
-        
-        # Compute weights based on strategy
-        if strategy == "inverse":
-            weights = 1.0 / counts
-        elif strategy == "sqrt":
-            weights = 1.0 / torch.sqrt(counts)
-        elif strategy == "balanced":
-            weights = (n_samples / vocab_size) / counts
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-        
-        # Normalize to sum to vocab_size (optional)
-        weights = weights * (vocab_size / weights.sum())
-        
-        return weights
+    def _validate_dataset_shapes(self, dataset):
+        """Validate that dataset samples have expected shapes"""
+        try:
+            for i in range(min(5, len(dataset))):  # Check first 5 samples
+                input_window, output_window, sequences = dataset[i]
+                
+                logger.info(f"Sample {i} shapes - "
+                           f"input: {input_window.shape}, "
+                           f"output: {output_window.shape}, "
+                           f"sequences: {sequences.shape}")
+                
+                assert len(input_window) == self.config['model']['context_length'], \
+                    f"Input window length {len(input_window)} != context_length {self.config['model']['context_length']}"
+                
+                assert len(output_window) == self.config['model']['prediction_steps'], \
+                    f"Output window length {len(output_window)} != prediction_steps {self.config['model']['prediction_steps']}"
+                
+        except Exception as e:
+            logger.error(f"Dataset validation failed: {str(e)}")
+            raise
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
-        """Helper to create dataloaders with consistent settings."""
+        def collate_fn(batch):
+            # Add batch shape debugging
+            inputs, targets, sequences = zip(*batch)
+            
+            logger.info(f"Raw batch shapes - "
+                       f"inputs: {[x.shape for x in inputs]}, "
+                       f"targets: {[x.shape for x in targets]}, "
+                       f"sequences: {[x.shape for x in sequences]}")
+            
+            inputs = torch.stack(inputs)
+            targets = torch.stack(targets)
+            sequences = torch.stack(sequences)
+            
+            logger.info(f"Stacked batch shapes - "
+                       f"inputs: {inputs.shape}, "
+                       f"targets: {targets.shape}, "
+                       f"sequences: {sequences.shape}")
+            
+            return inputs, targets, sequences
+
         return DataLoader(
             dataset,
             batch_size=self.config['training']['batch_size'],
@@ -186,21 +179,10 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.config['dataset'].get('num_workers', 1),
             pin_memory=self.config['dataset'].get('pin_memory', True),
             persistent_workers=self.config['dataset'].get('persistent_workers', True),
-            prefetch_factor=2,  
-            drop_last=shuffle  # Only drop last for training
+            prefetch_factor=2,
+            collate_fn=collate_fn,  # Use our custom collate with logging
+            drop_last=shuffle
         )
-
-    def train_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.train_dataset, shuffle=True)
-
-    def val_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.val_dataset, shuffle=False)
-
-    def test_dataloader(self) -> Optional[DataLoader]:
-        if self.test_dataset:
-            return self._create_dataloader(self.test_dataset, shuffle=False)
-        return None
-
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, important_classes: torch.Tensor | None = None):
