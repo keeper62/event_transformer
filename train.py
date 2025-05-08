@@ -106,6 +106,7 @@ def train_with_config(
             log_every_n_steps=config['training'].get('log_interval', 50),
             fast_dev_run=test_mode,
             overfit_batches=config['training'].get('overfit_batches', 0),
+            precision='16-mixed'
         )
 
         logger.info(f"Starting training with config: {config_name}")
