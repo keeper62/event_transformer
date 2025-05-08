@@ -34,12 +34,12 @@ class AbstractBGLDataset(Dataset, ABC):
             # Convert to tensors and move to device
             token_tensor = torch.tensor(
                 tokens, 
-                dtype=torch.int32,  # More efficient than int16 for modern GPUs
+                dtype=torch.long,  # More efficient than int16 for modern GPUs
                 device=self.device
             )
             
             seq_tensor = torch.stack([
-                torch.tensor(seq, dtype=torch.int32, device=self.device)
+                torch.tensor(seq, dtype=torch.long, device=self.device)
                 for seq in sequences
             ])
             
