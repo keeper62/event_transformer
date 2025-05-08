@@ -303,10 +303,23 @@ class TransformerLightning(pl.LightningModule):
         self.val_important_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='none')
         self.val_important_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='none')
 
+    def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
+        """Debug helper to check tensor devices"""
+        devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
+        if len(devices) > 1:
+            error_msg = f"Device mismatch detected. Found devices: {devices}\n"
+            error_msg += "Tensor details:\n"
+            for i, t in enumerate(tensors):
+                if isinstance(t, torch.Tensor):
+                    error_msg += f"  Tensor {i}: device={t.device}, shape={t.shape}, dtype={t.dtype}\n"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         
-        logger.debug(f"Input devices - inputs: {inputs.device}, targets: {targets.device}, sequences: {sequences.device}")
+        # Debug device consistency
+        self._validate_device_consistency(inputs, targets, sequences)
         
         device = inputs.device
         outputs = []
@@ -329,35 +342,46 @@ class TransformerLightning(pl.LightningModule):
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
                     
+                    # Debug the new sequence tensor
+                    new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
+                    self._validate_device_consistency(current_sequences, new_sequence)
+                    
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
-                        torch.tensor(tokenized, device=device).unsqueeze(1)
+                        new_sequence
                     ], dim=1)
 
         outputs = torch.stack(outputs, dim=1).float()
-        return outputs.reshape(-1, self.num_classes), targets.reshape(-1)
+        final_targets = targets.reshape(-1)
+        
+        # Final device check before return
+        self._validate_device_consistency(outputs, final_targets)
+        return outputs, final_targets
 
-    def training_step(self, batch, batch_idx):
-        logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(logits, targets)
-        
-        return loss
-    
     def validation_step(self, batch, batch_idx):
+        # Add device check at start
+        self._validate_device_consistency(*batch)
+        
         logits, targets = self._process_batch(batch)
-        
-        logger.debug(f"Device check - logits: {logits.device}, targets: {targets.device}, important_classes: {self.important_classes.device if len(self.important_classes) > 0 else 'N/A'}")
-        
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
+        # Check important_classes device
+        if len(self.important_classes) > 0:
+            self._validate_device_consistency(targets, self.important_classes)
+        
         # Update all metrics
-        self.val_acc.update(preds, targets)  # Changed from direct call to update()
-        self.val_precision.update(preds, targets)
-        self.val_recall.update(preds, targets)
-        self.val_f1_macro.update(preds, targets)
-        self.val_f1_weighted.update(preds, targets)
-        self.val_confmat.update(preds, targets)
+        metrics_to_update = {
+            'val_acc': (preds, targets),
+            'val_precision': (preds, targets),
+            'val_recall': (preds, targets),
+            'val_f1_macro': (preds, targets),
+            'val_f1_weighted': (preds, targets),
+            'val_confmat': (preds, targets)
+        }
+        
+        for metric_name, (p, t) in metrics_to_update.items():
+            getattr(self, metric_name).update(p, t)
         
         self.validation_step_outputs.append({
             'preds': preds,
@@ -365,21 +389,26 @@ class TransformerLightning(pl.LightningModule):
             'loss': loss
         })
         
-        # Only update important class metrics if they exist
         if len(self.important_classes) > 0:
-            logger.debug(f"Pre-isin check - targets device: {targets.device}, important_classes device: {self.important_classes.device}")
-            
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
-                # Update overall important accuracy
+                self._validate_device_consistency(
+                    preds[important_mask], 
+                    targets[important_mask],
+                    self.important_classes
+                )
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
-                
-                # Update per-class precision/recall
                 self.val_important_precision.update(preds, targets)
                 self.val_important_recall.update(preds, targets)
         
         return loss
 
+    def training_step(self, batch, batch_idx):
+        logits, targets = self._process_batch(batch)
+        loss = self.loss_fn(logits, targets)
+        
+        return loss
+    
     def on_validation_epoch_end(self):
         # Compute and log metrics
         all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
