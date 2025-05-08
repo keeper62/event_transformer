@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 import torch
 from torch.utils.data import Dataset
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AbstractBGLDataset(Dataset, ABC):
     def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False):
@@ -20,93 +23,90 @@ class AbstractBGLDataset(Dataset, ABC):
         del self.data
 
     def _process_groups(self):
-        """Process raw data groups into device-aware tensors."""
+        """Process raw data groups into tensors with shape validation"""
         processed_groups = []
         
-        for group in self.data:
-            # Process tokens and sequences
-            tokens, sequences = zip(*[
-                (int(event_id), self.tokenizer(message)) 
-                for event_id, message in group
-            ])
-            
-            # Convert to tensors and move to device
-            token_tensor = torch.tensor(
-                tokens, 
-                dtype=torch.long,  # More efficient than int16 for modern GPUs
-            )
-            
-            seq_tensor = torch.stack([
-                torch.tensor(seq, dtype=torch.long)
-                for seq in sequences
-            ])
-            
-            processed_groups.append((token_tensor, seq_tensor))
-            
+        for group_idx, group in enumerate(self.data):
+            try:
+                tokens, sequences = zip(*[
+                    (int(event_id), self.tokenizer(message)) 
+                    for event_id, message in group
+                ])
+                
+                # Convert to tensors
+                token_tensor = torch.tensor(tokens, dtype=torch.long)
+                seq_tensor = torch.stack([torch.tensor(seq, dtype=torch.long) for seq in sequences])
+                
+                # Validate shapes
+                if len(tokens) != len(sequences):
+                    raise ValueError(f"Group {group_idx}: tokens length {len(tokens)} != sequences length {len(sequences)}")
+                
+                processed_groups.append((token_tensor, seq_tensor))
+                
+            except Exception as e:
+                logger.debug(f"Error processing group {group_idx}: {str(e)}")
+                raise
+                
         return processed_groups
 
     def _generate_adaptive_windows(self):
-        """Generate windows with adaptive spreading and stride support."""
+        """Generate windows with shape validation"""
         sample_indices = []
-        
-        # Configurable parameters
-        base_stride = max(1, self.context_length // 4)
-        min_gap = base_stride
-        max_gap = self.context_length // 2
-        similarity_threshold = 0.6
         total_window_size = self.context_length + self.prediction_steps
-        
+        logger.debug(f"Generating windows with context_length={self.context_length}, "
+              f"prediction_steps={self.prediction_steps}, "
+              f"total_window_size={total_window_size}")
+
         for group_idx, (tokens, _) in enumerate(self.grouped_data):
             seq_len = len(tokens)
             
             if seq_len <= total_window_size:
+                if seq_len < total_window_size:
+                    logger.debug(f"Warning: Group {group_idx} length {seq_len} < required window size {total_window_size}")
                 sample_indices.append((group_idx, 0))
                 continue
                 
             pos = 0
             while pos + total_window_size <= seq_len:
-                sample_indices.append((group_idx, pos))
-                current_window = tokens[pos:pos+self.context_length]
-                
-                # Start with base stride
-                next_pos = pos + base_stride
-                
-                # Content-aware adjustment if possible
-                if next_pos + total_window_size <= seq_len:
-                    current_unique = torch.unique(current_window)
-                    current_set = set(current_unique.cpu().numpy())
+                # Validate window bounds
+                if pos + total_window_size > seq_len:
+                    logger.debug(f"Invalid window bounds: pos={pos}, seq_len={seq_len}, window_size={total_window_size}")
+                    break
                     
-                    for lookahead in range(min_gap, min(max_gap, seq_len - pos - total_window_size) + 1):
-                        next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
-                        next_unique = torch.unique(next_window)
-                        next_set = set(next_unique.cpu().numpy())
-                        
-                        # Calculate Jaccard similarity
-                        intersection = len(current_set & next_set)
-                        similarity = intersection / self.context_length
-                        
-                        if similarity < similarity_threshold:
-                            next_pos = pos + lookahead
-                            break
-                
-                pos = max(pos + 1, next_pos)
-                
-        return sample_indices
+                sample_indices.append((group_idx, pos))
+                pos += max(1, self.context_length // 4)  # Simplified stride for debugging
 
-    def __len__(self) -> int:
-        return len(self.sample_index)
+        print(f"Generated {len(sample_indices)} windows total")
+        return sample_indices
 
     def __getitem__(self, idx: int):
         group_idx, start_idx = self.sample_index[idx]
         tokens, sequences = self.grouped_data[group_idx]
         
-        # Slice windows
+        # Debug before slicing
+        logger.debug(f"\nSample {idx} from group {group_idx}:")
+        logger.debug(f"Original tokens length: {len(tokens)}")
+        logger.debug(f"Start index: {start_idx}, context_length: {self.context_length}, prediction_steps: {self.prediction_steps}")
+
+        # Slice windows with bounds checking
         input_end = start_idx + self.context_length
         output_end = input_end + self.prediction_steps
+        
+        if output_end > len(tokens):
+            raise ValueError(
+                f"Window out of bounds: start_idx={start_idx}, "
+                f"input_end={input_end}, output_end={output_end}, "
+                f"token_length={len(tokens)}"
+            )
         
         input_window = tokens[start_idx:input_end]
         output_window = tokens[input_end:output_end]
         input_sequences = sequences[start_idx:input_end]
+        
+        # Debug output shapes
+        logger.debug(f"Shapes - input_window: {input_window.shape}, "
+              f"output_window: {output_window.shape}, "
+              f"input_sequences: {input_sequences.shape}")
         
         return input_window, output_window, input_sequences
 
