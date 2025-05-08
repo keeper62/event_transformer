@@ -484,7 +484,7 @@ class TransformerLightning(pl.LightningModule):
     def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
         """Debug helper to check tensor devices"""
         devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
-        self._logger.debug("Devices: ", {t.device for t in tensors if isinstance(t, torch.Tensor)})
+        self._logger.debug(f"Devices: {devices}")
         if len(devices) > 1:
             error_msg = f"Device mismatch detected. Found devices: {devices}\n"
             error_msg += "Tensor details:\n"
