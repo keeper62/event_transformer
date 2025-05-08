@@ -94,7 +94,7 @@ class DataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         self._setup_complete = False
         
-        self.logger = setup_logger("Hi")
+        self._logger = setup_logger("Hi")
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
@@ -152,7 +152,7 @@ class DataModule(pl.LightningDataModule):
             )
 
         self._setup_complete = True
-        self.logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
+        self._logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
 
     def _validate_dataset_shapes(self, dataset):
         """Validate that dataset samples have expected shapes"""
@@ -160,7 +160,7 @@ class DataModule(pl.LightningDataModule):
             for i in range(min(5, len(dataset))):  # Check first 5 samples
                 input_window, output_window, sequences = dataset[i]
                 
-                self.logger.debug(f"Sample {i} shapes - "
+                self._logger.debug(f"Sample {i} shapes - "
                            f"input: {input_window.shape}, "
                            f"output: {output_window.shape}, "
                            f"sequences: {sequences.shape}")
@@ -172,7 +172,7 @@ class DataModule(pl.LightningDataModule):
                     f"Output window length {len(output_window)} != prediction_steps {self.config['model']['prediction_steps']}"
                 
         except Exception as e:
-            self.logger.error(f"Dataset validation failed: {str(e)}")
+            self._logger.error(f"Dataset validation failed: {str(e)}")
             raise
 
     def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
@@ -180,7 +180,7 @@ class DataModule(pl.LightningDataModule):
             # Add batch shape debugging
             inputs, targets, sequences = zip(*batch)
             
-            self.logger.debug(f"Raw batch shapes - "
+            self._logger.debug(f"Raw batch shapes - "
                        f"inputs: {[x.shape for x in inputs]}, "
                        f"targets: {[x.shape for x in targets]}, "
                        f"sequences: {[x.shape for x in sequences]}")
@@ -189,7 +189,7 @@ class DataModule(pl.LightningDataModule):
             targets = torch.stack(targets)
             sequences = torch.stack(sequences)
             
-            self.logger.debug(f"Stacked batch shapes - "
+            self._logger.debug(f"Stacked batch shapes - "
                        f"inputs: {inputs.shape}, "
                        f"targets: {targets.shape}, "
                        f"sequences: {sequences.shape}")
@@ -306,7 +306,7 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self.logger = setup_logger("Ho")
+        self._logger = setup_logger("Ho")
         
         # Class tracking setup
         self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
@@ -332,9 +332,9 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        self.logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
         output = self.model(inputs, sequences)
-        self.logger.debug(f"Model output shape: {output.shape}")
+        self._logger.debug(f"Model output shape: {output.shape}")
         return output
     
     def _init_tracking_structures(self):
@@ -490,7 +490,7 @@ class TransformerLightning(pl.LightningModule):
             for i, t in enumerate(tensors):
                 if isinstance(t, torch.Tensor):
                     error_msg += f"  Tensor {i}: device={t.device}, shape={t.shape}, dtype={t.dtype}\n"
-            self.logger.error(error_msg)
+            self._logger.error(error_msg)
             raise RuntimeError(error_msg)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -498,7 +498,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Debug device consistency
         self._validate_device_consistency(inputs, targets, sequences)
-        self.logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
+        self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
         
         device = inputs.device
         outputs = []
@@ -508,7 +508,7 @@ class TransformerLightning(pl.LightningModule):
             current_sequences = sequences.clone()
 
             for step in range(self.model.n_steps):
-                self.logger.debug(f"Step {step} shapes - current_inputs: {current_inputs.shape}, current_sequences: {current_sequences.shape}")
+                self._logger.debug(f"Step {step} shapes - current_inputs: {current_inputs.shape}, current_sequences: {current_sequences.shape}")
                 logits = self(current_inputs, current_sequences)
                 logits_last = logits[:, -1, :]
                 outputs.append(logits_last)
@@ -517,7 +517,7 @@ class TransformerLightning(pl.LightningModule):
                     probs = torch.softmax(logits_last, dim=-1)
                     preds = probs.argmax(dim=-1)
                     
-                    self.logger.debug(f"Prediction shapes - probs: {probs.shape}, preds: {preds.shape}")
+                    self._logger.debug(f"Prediction shapes - probs: {probs.shape}, preds: {preds.shape}")
                     
                     current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
                     
@@ -527,7 +527,7 @@ class TransformerLightning(pl.LightningModule):
                     # Debug the new sequence tensor
                     new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
                     self._validate_device_consistency(current_sequences, new_sequence)
-                    self.logger.debug(f"New sequence shape: {new_sequence.shape}")
+                    self._logger.debug(f"New sequence shape: {new_sequence.shape}")
                     
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
@@ -538,7 +538,7 @@ class TransformerLightning(pl.LightningModule):
         final_outputs = outputs.reshape(-1, self.num_classes)
         final_targets = targets.reshape(-1)
         
-        self.logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
+        self._logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
         
         final_targets = targets.reshape(-1)
         
