@@ -305,6 +305,9 @@ class TransformerLightning(pl.LightningModule):
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
+        
+        logger.debug(f"Input devices - inputs: {inputs.device}, targets: {targets.device}, sequences: {sequences.device}")
+        
         device = inputs.device
         outputs = []
 
@@ -342,6 +345,9 @@ class TransformerLightning(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
+        
+        logger.debug(f"Device check - logits: {logits.device}, targets: {targets.device}, important_classes: {self.important_classes.device if len(self.important_classes) > 0 else 'N/A'}")
+        
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
@@ -361,6 +367,8 @@ class TransformerLightning(pl.LightningModule):
         
         # Only update important class metrics if they exist
         if len(self.important_classes) > 0:
+            logger.debug(f"Pre-isin check - targets device: {targets.device}, important_classes device: {self.important_classes.device}")
+            
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
                 # Update overall important accuracy

@@ -15,7 +15,7 @@ from training import DataModule, TransformerLightning
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -30,6 +30,7 @@ def setup_environment(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
     sys.path.append(os.path.abspath("."))
+    torch.set_float32_matmul_precision('medium')
 
 def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     """Create and return a list of callbacks for the trainer."""
