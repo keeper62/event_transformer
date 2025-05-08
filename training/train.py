@@ -290,8 +290,7 @@ class DataModule(pl.LightningDataModule):
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
-                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20,
-                 logger = None):
+                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights', 'important_classes'])
         
@@ -308,8 +307,8 @@ class TransformerLightning(pl.LightningModule):
         
         self._logger = setup_logger(self.__class__.__name__)
         
-        # Class tracking setup
-        self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
+        # Class tracking setup - now device-aware
+        self.important_classes = self._init_tensor(important_classes, torch.long) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
         self.top_k = top_k
         self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
@@ -320,7 +319,7 @@ class TransformerLightning(pl.LightningModule):
         self._init_metrics()
         self._init_tracking_structures()
         
-        # Loss function
+        # Loss function (device will be set automatically)
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
@@ -330,6 +329,12 @@ class TransformerLightning(pl.LightningModule):
         # Training state
         self.best_val_loss = float('inf')
         self.validation_step_outputs = []
+        
+    def _init_tensor(self, tensor: Optional[torch.Tensor], dtype: torch.dtype) -> torch.Tensor:
+        """Ensure tensor is on correct device with proper dtype"""
+        if tensor is None:
+            return torch.tensor([], dtype=dtype, device=self.device)
+        return tensor.to(device=self.device, dtype=dtype)
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
@@ -342,16 +347,16 @@ class TransformerLightning(pl.LightningModule):
         # For important classes
         self.important_class_samples = []
         
-        # For top/bottom k classes
+        # For top/bottom k classes - now device-aware
         self.class_counts = torch.zeros(self.num_classes, dtype=torch.long, device=self.device)
         self.top_bottom_samples = []
-        self._sample_size = 1000  # Samples to keep for analysis
+        self._sample_size = 1000
+
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
-        """Boost weights for important classes (tensor version)"""
-        adjusted_weights = original_weights.clone()
+        """Boost weights for important classes with device consistency"""
+        adjusted_weights = original_weights.to(self.device).clone()
         if len(self.important_classes) > 0:
-            # Ensure we don't try to boost classes beyond the weight vector length
             valid_mask = self.important_classes < len(adjusted_weights)
             valid_classes = self.important_classes[valid_mask]
             adjusted_weights[valid_classes] *= self.importance_boost_factor
@@ -387,7 +392,7 @@ class TransformerLightning(pl.LightningModule):
     def _compute_approximate_f1(self):
         """Compute approximate F1 score from samples"""
         if not self._f1_samples:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, device=self.device)
         
         samples = torch.cat(self._f1_samples)
         is_correct = samples[:, 0]
@@ -412,7 +417,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Sample data for analysis
         if len(preds) > self._sample_size:
-            indices = torch.randperm(len(preds))[:self._sample_size]
+            indices = torch.randperm(len(preds), device=self.device)[:self._sample_size]
             preds = preds[indices]
             targets = targets[indices]
         
@@ -497,10 +502,12 @@ class TransformerLightning(pl.LightningModule):
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         
-        # Debug device consistency
-        self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
+        # Ensure all inputs are on correct device
+        inputs = inputs.to(self.device)
+        targets = targets.to(self.device)
+        sequences = sequences.to(self.device)
         
-        device = inputs.device
+        device = self.device
         outputs = []
 
         with torch.amp.autocast(device_type=device.type, enabled=self.hparams.config['training'].get('mixed_precision', True)):
@@ -516,14 +523,15 @@ class TransformerLightning(pl.LightningModule):
                     probs = torch.softmax(logits_last, dim=-1)
                     preds = probs.argmax(dim=-1)
                     
-                    current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
+                    current_inputs = torch.cat([
+                        current_inputs[:, 1:], 
+                        preds.unsqueeze(1).to(device)  # Explicit device
+                    ], dim=1)
                     
                     pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
                     tokenized = self.tokenizer.batch_transform(pred_templates)
                     
-                    # Debug the new sequence tensor
                     new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
-                    
                     current_sequences = torch.cat([
                         current_sequences[:, 1:], 
                         new_sequence
@@ -533,42 +541,29 @@ class TransformerLightning(pl.LightningModule):
         final_outputs = outputs.reshape(-1, self.num_classes)
         final_targets = targets.reshape(-1)
         
-        self._logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
-        
-        final_targets = targets.reshape(-1)
-        
-        # Final device check before return
-        self._validate_device_consistency(outputs, final_targets)
-        return outputs.to(device), final_targets.to(device)
+        return final_outputs, final_targets
+
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
-        # Flatten if needed
-        if logits.dim() == 3:
-            preds = preds.view(-1)
-            targets = targets.view(-1)
-        
-        # Update core metrics
-        self.val_acc.update(preds, targets)
+        # Update metrics
+        self.val_acc(preds, targets)
         self._update_f1_approximation(preds, targets)
         
-        self.validation_step_outputs.append(loss)
-        
-        # Update important class metrics
         if len(self.important_classes) > 0:
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
-                self.val_important_acc.update(preds[important_mask], targets[important_mask])
+                self.val_important_acc(preds[important_mask], targets[important_mask])
         
+        self.validation_step_outputs.append(loss)
         return loss
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
-        
         return loss
     
     def on_train_batch_start(self, batch, batch_idx):
