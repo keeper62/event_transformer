@@ -122,12 +122,13 @@ def train_with_config(
             strategy='ddp_find_unused_parameters_false' if num_accelerators > 1 else 'auto',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
-            gradient_clip_val=config['training'].get('gradient_clip_val', 1.0),
+            gradient_clip_val=config['training'].get('gradient_clip_val', None),
             deterministic=True,
             enable_checkpointing=not test_mode,
             log_every_n_steps=config['training'].get('log_interval', 50),
             fast_dev_run=test_mode,
             overfit_batches=config['training'].get('overfit_batches', 0),
+            enable_progress_bar=int(os.getenv("LOCAL_RANK", 0)) == 0,
             precision='16-mixed'
         )
 

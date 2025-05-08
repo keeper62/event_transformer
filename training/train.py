@@ -16,49 +16,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2, alpha=None, reduction='mean', num_classes=None):
-        """
-        PyTorch implementation of Focal Loss.
-        
-        Args:
-            alpha (Tensor, optional): Class weighting tensor (size [C]). If None, no weighting.
-            gamma (float): Focusing parameter (gamma >= 0). Higher gamma reduces easy example impact.
-            label_smoothing (float): Smoothing factor for one-hot labels (0 <= label_smoothing < 1).
-            reduction (str): 'mean', 'sum', or 'none'.
-        """
-        super(FocalLoss, self).__init__()
+    def __init__(self, gamma=2, alpha=None, reduction='mean'):
+        super().__init__()
         self.gamma = gamma
         self.alpha = alpha
         self.reduction = reduction
-        self.num_classes = num_classes
 
     def forward(self, inputs, targets):
-        """ Focal loss for multi-class classification. """
+        """
+        Args:
+            inputs: (N, L, C) or (N, C) where C = num_classes
+            targets: (N, L) or (N,) containing class indices
+        """
+        # Flatten sequence dimensions if needed
+        if inputs.dim() == 3:
+            inputs = inputs.reshape(-1, inputs.size(-1))  # [N*L, C]
+            targets = targets.reshape(-1)  # [N*L]
+        
+        # Debug shapes
+        logging.debug(f"FocalLoss shapes - inputs: {inputs.shape}, targets: {targets.shape}")
+        
+        # Convert logits to probabilities
+        probs = F.softmax(inputs, dim=1)
+        
+        # Create one-hot encoding
+        targets_one_hot = F.one_hot(targets, num_classes=inputs.size(-1)).float()
+        
+        # Compute loss
+        log_probs = torch.log(probs.clamp(min=1e-8))
+        ce_loss = -targets_one_hot * log_probs
+        p_t = torch.sum(probs * targets_one_hot, dim=1)
+        focal_weight = (1 - p_t) ** self.gamma
+        
         if self.alpha is not None:
             alpha = self.alpha.to(inputs.device)
-
-        # Convert logits to probabilities with softmax
-        probs = F.softmax(inputs, dim=1)
-
-        # One-hot encode the targets
-        targets_one_hot = F.one_hot(targets, num_classes=self.num_classes).float()
-
-        # Compute cross-entropy for each class
-        ce_loss = -targets_one_hot * torch.log(probs)
-
-        # Compute focal weight
-        p_t = torch.sum(probs * targets_one_hot, dim=1)  # p_t for each sample
-        focal_weight = (1 - p_t) ** self.gamma
-
-        # Apply alpha if provided (per-class weighting)
-        if self.alpha is not None:
             alpha_t = alpha.gather(0, targets)
             ce_loss = alpha_t.unsqueeze(1) * ce_loss
-
-        # Apply focal loss weight
+        
         loss = focal_weight.unsqueeze(1) * ce_loss
-
+        
         if self.reduction == 'mean':
             return loss.mean()
         elif self.reduction == 'sum':
@@ -89,14 +88,17 @@ class DataModule(pl.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
+    def prepare_data(self):
+        """One-time download/preparation steps"""
+        pass  # Add any data downloading/preprocessing here if needed
+
     def setup(self, stage: Optional[str] = None) -> None:
+        """Initialize datasets for each stage"""
         if self._setup_complete:
             return
             
-        logger.info(f"Initializing dataset with context_length={self.config['model']['context_length']} "
-                   f"and prediction_steps={self.config['model']['prediction_steps']}")
-            
-        full_dataset = self.dataset_class(
+        # Initialize full dataset
+        self.full_dataset = self.dataset_class(
             path=self.config['dataset']['path'],
             prediction_steps=self.config['model']['prediction_steps'],
             context_length=self.config['model']['context_length'],
@@ -105,24 +107,21 @@ class DataModule(pl.LightningDataModule):
             test_mode=self.test_mode
         )
 
-        # Validate dataset samples
-        self._validate_dataset_shapes(full_dataset)
-
         # Split dataset
         if self.test_mode:
-            test_size = min(100, len(full_dataset) // 10)
-            train_size = len(full_dataset) - test_size
+            test_size = min(100, len(self.full_dataset) // 10)
+            train_size = len(self.full_dataset) - test_size
             self.train_dataset, self.test_dataset = random_split(
-                full_dataset, 
+                self.full_dataset, 
                 [train_size, test_size],
                 generator=torch.Generator().manual_seed(42)
             )
             self.val_dataset = self.test_dataset
         else:
-            val_size = min(int(0.2 * len(full_dataset)), 2500)
-            train_size = len(full_dataset) - val_size
+            val_size = min(int(0.2 * len(self.full_dataset)), 2500)
+            train_size = len(self.full_dataset) - val_size
             self.train_dataset, self.val_dataset = random_split(
-                full_dataset,
+                self.full_dataset,
                 [train_size, val_size],
                 generator=torch.Generator().manual_seed(42)
             )
@@ -230,21 +229,43 @@ class DataModule(pl.LightningDataModule):
         weights = weights * (vocab_size / weights.sum())
         
         return weights
-
+    
     def train_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.train_dataset, shuffle=True)
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=True,
+            num_workers=self.config['dataset'].get('num_workers'),
+            pin_memory=True,
+            persistent_workers=True,
+            drop_last=True
+        )
 
     def val_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.val_dataset, shuffle=False)
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=False,
+            num_workers=self.config['dataset'].get('num_workers'),
+            pin_memory=True,
+            persistent_workers=True
+        )
 
-    def test_dataloader(self) -> Optional[DataLoader]:
-        if self.test_dataset:
-            return self._create_dataloader(self.test_dataset, shuffle=False)
-        return None
+    def test_dataloader(self) -> DataLoader:
+        if not hasattr(self, 'test_dataset'):
+            return None
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=False,
+            num_workers=self.config['dataset'].get('num_workers'),
+            pin_memory=True
+        )
 
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, important_classes: torch.Tensor | None = None):
+    def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
+                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights', 'important_classes'])
         
@@ -259,21 +280,23 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
+        # Class tracking setup
         self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
+        self.top_k = top_k
+        self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
         
         self.class_weights = self._adjust_class_weights(class_weights)
-        self._init_important_metrics()
         
         # Initialize metrics
         self._init_metrics()
+        self._init_tracking_structures()
         
         # Loss function
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
-            reduction='mean',
-            num_classes=self.num_classes
+            reduction='mean'
         )
         
         # Training state
@@ -281,10 +304,20 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        logger.info(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
         output = self.model(inputs, sequences)
-        logger.info(f"Model output shape: {output.shape}")
+        logger.debug(f"Model output shape: {output.shape}")
         return output
+    
+    def _init_tracking_structures(self):
+        """Initialize structures for tracking class performance"""
+        # For important classes
+        self.important_class_samples = []
+        
+        # For top/bottom k classes
+        self.class_counts = torch.zeros(self.num_classes, dtype=torch.long, device=self.device)
+        self.top_bottom_samples = []
+        self._sample_size = 1000  # Samples to keep for analysis
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -297,46 +330,119 @@ class TransformerLightning(pl.LightningModule):
         return adjusted_weights
 
     def _init_metrics(self):
-        """Initialize metrics with better handling for multi-class scenario."""
-        # Main metrics - using macro average which is better for imbalanced classes
-        self.val_acc = torchmetrics.Accuracy(
-            task="multiclass", 
-            num_classes=self.num_classes,
-            average='micro'
-        )
+        """Initialize memory-efficient metrics"""
+        common_args = {
+            'task': 'multiclass',
+            'num_classes': self.num_classes,
+            'sync_on_compute': False
+        }
         
-        # Precision and Recall with macro average
-        self.val_precision = torchmetrics.Precision(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='weighted',
-            ignore_index=-1  # Ignore padding if any
-        )
+        # Core metrics
+        self.val_acc = torchmetrics.Accuracy(**common_args, average='micro')
         
-        self.val_recall = torchmetrics.Recall(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='weighted',
-            ignore_index=-1
-        )
+        # Lightweight F1 approximation
+        self._f1_samples = []  # Store (correct, pred, target) tuples
+        self._f1_sample_size = 1000  # Number of samples to keep
         
-        # F1 scores - both macro and weighted
-        self.val_f1_macro = torchmetrics.F1Score(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='macro'
-        )
+        # Important class tracking
+        if len(self.important_classes) > 0:
+            self.val_important_acc = torchmetrics.Accuracy(**common_args)
+            
+    def _update_f1_approximation(self, preds, targets):
+        """Store samples for F1 approximation"""
+        if len(self._f1_samples) < self._f1_sample_size:
+            # Store (is_correct, predicted_class, true_class)
+            is_correct = (preds == targets).float()
+            samples = torch.stack([is_correct, preds.float(), targets.float()], dim=1)
+            self._f1_samples.append(samples)
+            
+    def _compute_approximate_f1(self):
+        """Compute approximate F1 score from samples"""
+        if not self._f1_samples:
+            return torch.tensor(0.0)
         
-        self.val_f1_weighted = torchmetrics.F1Score(
-            task="multiclass",
-            num_classes=self.num_classes,
-            average='weighted'
-        )
+        samples = torch.cat(self._f1_samples)
+        is_correct = samples[:, 0]
+        preds = samples[:, 1].long()
+        targets = samples[:, 2].long()
         
-        # For class distribution analysis
-        self.val_confmat = torchmetrics.ConfusionMatrix(
-            task="multiclass",
-            num_classes=self.num_classes,
+        # Compute precision and recall approximation
+        true_pos = is_correct.sum()
+        pred_pos = len(preds)
+        actual_pos = len(targets)
+        
+        precision = true_pos / pred_pos
+        recall = true_pos / actual_pos
+        
+        return 2 * (precision * recall) / (precision + recall + 1e-8)
+            
+    def _track_class_performance(self, preds: torch.Tensor, targets: torch.Tensor):
+        """Track samples for important and top/bottom classes"""
+        # Update class counts
+        unique, counts = torch.unique(targets, return_counts=True)
+        self.class_counts[unique] += counts
+        
+        # Sample data for analysis
+        if len(preds) > self._sample_size:
+            indices = torch.randperm(len(preds))[:self._sample_size]
+            preds = preds[indices]
+            targets = targets[indices]
+        
+        # Track important classes
+        if len(self.important_classes) > 0:
+            important_mask = torch.isin(targets, self.important_classes)
+            if important_mask.any():
+                self.important_class_samples.append((
+                    preds[important_mask],
+                    targets[important_mask]
+                ))
+        
+        # Track top/bottom k classes
+        current_counts = self.class_counts.cpu().numpy()
+        top_classes = np.argpartition(-current_counts, self.top_k)[:self.top_k]
+        bottom_classes = np.argpartition(current_counts, self.bottom_k)[:self.bottom_k]
+        
+        track_classes = torch.tensor(np.concatenate([top_classes, bottom_classes]), 
+                                   device=self.device)
+        track_mask = torch.isin(targets, track_classes)
+        
+        if track_mask.any():
+            self.top_bottom_samples.append((
+                preds[track_mask],
+                targets[track_mask]
+            ))
+
+    def _compute_tracked_confusion(self, samples, 
+                                 classes: torch.Tensor) -> torch.Tensor:
+        """Compute confusion matrix for tracked classes"""
+        if not samples:
+            return None
+            
+        all_preds, all_targets = zip(*samples)
+        preds = torch.cat(all_preds)
+        targets = torch.cat(all_targets)
+        
+        # Filter to only the specified classes
+        mask = torch.isin(targets, classes)
+        if not mask.any():
+            return None
+            
+        preds = preds[mask]
+        targets = targets[mask]
+        
+        # Create mapping to contiguous indices
+        unique_classes = classes.unique()
+        class_map = {cls.item(): i for i, cls in enumerate(unique_classes)}
+        
+        mapped_targets = torch.tensor([class_map[t.item()] for t in targets], 
+                                    device=targets.device)
+        mapped_preds = torch.tensor([class_map[p.item()] for p in preds], 
+                                   device=preds.device)
+        
+        return torchmetrics.functional.confusion_matrix(
+            mapped_preds, mapped_targets,
+            task='multiclass',
+            num_classes=len(unique_classes),
             normalize='true'
         )
         
@@ -413,47 +519,26 @@ class TransformerLightning(pl.LightningModule):
         return outputs, final_targets
 
     def validation_step(self, batch, batch_idx):
-        # Add device check at start
-        self._validate_device_consistency(*batch)
-        
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         preds = logits.argmax(dim=-1)
         
-        # Check important_classes device
-        if len(self.important_classes) > 0:
-            self._validate_device_consistency(targets, self.important_classes)
+        # Flatten if needed
+        if logits.dim() == 3:
+            preds = preds.view(-1)
+            targets = targets.view(-1)
         
-        # Update all metrics
-        metrics_to_update = {
-            'val_acc': (preds, targets),
-            'val_precision': (preds, targets),
-            'val_recall': (preds, targets),
-            'val_f1_macro': (preds, targets),
-            'val_f1_weighted': (preds, targets),
-            'val_confmat': (preds, targets)
-        }
+        # Update core metrics
+        self.val_acc.update(preds, targets)
+        self._update_f1_approximation(preds, targets)
         
-        for metric_name, (p, t) in metrics_to_update.items():
-            getattr(self, metric_name).update(p, t)
+        self.validation_step_outputs.append(loss)
         
-        self.validation_step_outputs.append({
-            'preds': preds,
-            'targets': targets,
-            'loss': loss
-        })
-        
+        # Update important class metrics
         if len(self.important_classes) > 0:
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
-                self._validate_device_consistency(
-                    preds[important_mask], 
-                    targets[important_mask],
-                    self.important_classes
-                )
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
-                self.val_important_precision.update(preds, targets)
-                self.val_important_recall.update(preds, targets)
         
         return loss
 
@@ -463,94 +548,122 @@ class TransformerLightning(pl.LightningModule):
         
         return loss
     
+    def on_train_batch_start(self, batch, batch_idx):
+        if batch_idx % 100 == 0:
+            logging.debug(f"\nMemory Usage (Batch {batch_idx}):")
+            if torch.cuda.is_available():
+                logging.debug(f"GPU Allocated: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+                logging.debug(f"GPU Reserved: {torch.cuda.memory_reserved()/1e9:.2f}GB")
+            else:
+                import psutil
+                process = psutil.Process()
+                logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
+                logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
+    
     def on_validation_epoch_end(self):
-        # Compute and log metrics
-        all_targets = torch.cat([x['targets'] for x in self.validation_step_outputs])
-        
-        # Compute confusion matrix and get class-wise metrics
-        confmat = self.val_confmat.compute()
-        
-        # Get metrics for the 10 most frequent and 10 least frequent classes
-        class_counts = torch.bincount(all_targets)
-        top_classes = torch.topk(class_counts, 10).indices
-        bottom_classes = torch.topk(class_counts, 10, largest=False).indices
-        
-        # Compute all metrics first
         metrics = {
-            'val/loss': torch.stack([x['loss'] for x in self.validation_step_outputs]).mean(),
+            'val/loss': torch.stack([x for x in self.validation_step_outputs]).mean(),
             'val/acc': self.val_acc.compute(),
-            'val/precision_macro': self.val_precision.compute(),
-            'val/recall_macro': self.val_recall.compute(),
-            'val/f1_macro': self.val_f1_macro.compute(),
-            'val/f1_weighted': self.val_f1_weighted.compute(),
+            'val/approx_f1': self._compute_approximate_f1()
         }
         
-        # Convert class counts to float for logging
-        class_counts_float = class_counts.float()
-        
-        # Prepare class-specific metrics
-        class_metrics = {}
-        for i in top_classes:
-            if class_counts[i] > 0:
-                precision = confmat[i, i] / confmat[:, i].sum()
-                recall = confmat[i, i] / confmat[i, :].sum()
-                class_metrics.update({
-                    f'val_top_classes/class_{i}_precision': precision,
-                    f'val_top_classes/class_{i}_recall': recall,
-                    f'val_top_classes/class_{i}_support': class_counts_float[i]  # Convert to float
-                })
-                
-        for i in bottom_classes:
-            if class_counts[i] > 0:
-                precision = confmat[i, i] / confmat[:, i].sum()
-                recall = confmat[i, i] / confmat[i, :].sum()
-                class_metrics.update({
-                    f'val_rare_classes/class_{i}_precision': precision,
-                    f'val_rare_classes/class_{i}_recall': recall,
-                    f'val_rare_classes/class_{i}_support': class_counts_float[i]  # Convert to float
-                })
-        
-        # Log important class metrics if they exist
+        # Compute important class metrics
         if len(self.important_classes) > 0:
-            # Get overall important class accuracy
-            important_acc = self.val_important_acc.compute()
-            metrics['val/important_acc'] = important_acc
+            metrics['val/important_acc'] = self.val_important_acc.compute()
             
-            # Get per-class metrics only for important classes
-            precisions = self.val_important_precision.compute()
-            recalls = self.val_important_recall.compute()
+            # Compute confusion matrix for important classes
+            important_confmat = self._compute_tracked_confusion(
+                self.important_class_samples,
+                self.important_classes
+            )
+            if important_confmat is not None:
+                self.important_class_confmat = important_confmat
+                # Compute precision/recall/F1 for important classes
+                for i, cls in enumerate(self.important_classes):
+                    cls_idx = i
+                    tp = important_confmat[cls_idx, cls_idx]
+                    fp = important_confmat[:, cls_idx].sum() - tp
+                    fn = important_confmat[cls_idx, :].sum() - tp
+                    
+                    precision = tp / (tp + fp + 1e-8)
+                    recall = tp / (tp + fn + 1e-8)
+                    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+                    
+                    metrics.update({
+                        f'val/important_{cls.item()}_precision': precision,
+                        f'val/important_{cls.item()}_recall': recall,
+                        f'val/important_{cls.item()}_f1': f1
+                    })
+        
+        # Compute top/bottom class metrics
+        current_counts = self.class_counts.cpu().numpy()
+        top_classes = torch.tensor(np.argpartition(-current_counts, self.top_k)[:self.top_k], 
+                    device=self.device)
+        bottom_classes = torch.tensor(np.argpartition(current_counts, self.bottom_k)[:self.bottom_k],
+                        device=self.device)
+        
+        tracked_classes = torch.cat([top_classes, bottom_classes])
+        top_bottom_confmat = self._compute_tracked_confusion(
+            self.top_bottom_samples,
+            tracked_classes
+        )
+        
+        if top_bottom_confmat is not None:
+            self.top_bottom_confmat = top_bottom_confmat
+            num_top = len(top_classes)
             
-            for i, cls in enumerate(self.important_classes):
-                cls = cls.item()
+            # Track metrics for top classes
+            for i, cls in enumerate(top_classes):
+                cls_idx = i
+                tp = top_bottom_confmat[cls_idx, cls_idx]
+                fp = top_bottom_confmat[:, cls_idx].sum() - tp
+                fn = top_bottom_confmat[cls_idx, :].sum() - tp
+                
+                precision = tp / (tp + fp + 1e-8)
+                recall = tp / (tp + fn + 1e-8)
+                f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+                
                 metrics.update({
-                    f'val/important_{cls}_precision': precisions[cls],
-                    f'val/important_{cls}_recall': recalls[cls],
-                    f'val/important_{cls}_fnr': 1 - recalls[cls]
+                    f'val/top_{i}_acc': top_bottom_confmat[cls_idx, cls_idx] / top_bottom_confmat[cls_idx, :].sum(),
+                    f'val/top_{i}_precision': precision,
+                    f'val/top_{i}_recall': recall,
+                    f'val/top_{i}_f1': f1
+                })
+            
+            # Track metrics for bottom classes
+            for j, cls in enumerate(bottom_classes):
+                cls_idx = num_top + j
+                tp = top_bottom_confmat[cls_idx, cls_idx]
+                fp = top_bottom_confmat[:, cls_idx].sum() - tp
+                fn = top_bottom_confmat[cls_idx, :].sum() - tp
+                
+                precision = tp / (tp + fp + 1e-8)
+                recall = tp / (tp + fn + 1e-8)
+                f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+                
+                metrics.update({
+                    f'val/bottom_{j}_acc': top_bottom_confmat[cls_idx, cls_idx] / top_bottom_confmat[cls_idx, :].sum(),
+                    f'val/bottom_{j}_precision': precision,
+                    f'val/bottom_{j}_recall': recall,
+                    f'val/bottom_{j}_f1': f1
                 })
         
-        # Log all metrics at once
         self.log_dict(metrics, prog_bar=True)
-        self.log_dict(class_metrics)
-        
-        # Clear validation outputs and reset metrics
-        self.validation_step_outputs.clear()
         self._reset_metrics()
+        self._reset_tracking()
+
+    def _reset_tracking(self):
+        """Reset tracking structures for next epoch"""
+        self.important_class_samples.clear()
+        self.top_bottom_samples.clear()
+        self.class_counts.zero_()
 
     def _reset_metrics(self):
-        """Reset both regular and important metrics"""
-        # Reset all metrics
+        """Reset metrics"""
         self.val_acc.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
-        self.val_f1_macro.reset()
-        self.val_f1_weighted.reset()
-        self.val_confmat.reset()
-        
-        # Reset important metrics
+        self._f1_samples.clear()
         if len(self.important_classes) > 0:
             self.val_important_acc.reset()
-            self.val_important_precision.reset()
-            self.val_important_recall.reset()
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
@@ -559,7 +672,7 @@ class TransformerLightning(pl.LightningModule):
             self.parameters(),
             lr=training_cfg.get('lr', 1e-4),
             weight_decay=training_cfg.get('weight_decay', 0.01),
-            fused=True
+            fused=False
         )
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
