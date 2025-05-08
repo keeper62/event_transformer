@@ -76,17 +76,16 @@ class AbstractBGLDataset(Dataset, ABC):
                 # Content-aware adjustment if possible
                 if next_pos + total_window_size <= seq_len:
                     current_unique = torch.unique(current_window)
+                    current_set = set(current_unique.cpu().numpy())
                     
                     for lookahead in range(min_gap, min(max_gap, seq_len - pos - total_window_size) + 1):
                         next_window = tokens[pos+lookahead:pos+lookahead+self.context_length]
                         next_unique = torch.unique(next_window)
+                        next_set = set(next_unique.cpu().numpy())
                         
-                        # Use torch's intersect for GPU efficiency
-                        similarity = len(torch.intersect1d(
-                            current_unique, 
-                            next_unique,
-                            return_counts=False
-                        )) / self.context_length
+                        # Calculate Jaccard similarity
+                        intersection = len(current_set & next_set)
+                        similarity = intersection / self.context_length
                         
                         if similarity < similarity_threshold:
                             next_pos = pos + lookahead
