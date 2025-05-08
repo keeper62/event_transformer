@@ -14,12 +14,33 @@ from models import load_config
 from training import DataModule, TransformerLightning
 
 # Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+def setup_logger(name: str | None = None) -> logging.Logger:
+    """Setup logger that only logs on the main process."""
+    logger = logging.getLogger(name or __name__)
+    
+    # Only add handlers if not already added and we're on the main process
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        
+        # Check if we're in a distributed environment and are the main process
+        rank_key = os.environ.get("LOCAL_RANK", "0")
+        is_main_process = rank_key == "0"
+        
+        if is_main_process:
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        else:
+            # Add null handler to prevent "No handlers found" warnings
+            logger.addHandler(logging.NullHandler())
+    
+    return logger
+
+# Usage:
+logger = setup_logger()
 
 important_errors = torch.tensor([42, 101, 567, 1423, 3500, 4582], dtype=torch.long)
 
