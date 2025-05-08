@@ -94,7 +94,7 @@ class DataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         self._setup_complete = False
         
-        self.logger = setup_logger(self.__class__.__name__)
+        self.logger = setup_logger("Hi")
         
         # Initialize components
         self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
@@ -306,7 +306,7 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self.logger = setup_logger(self.__class__.__name__)
+        self.logger = setup_logger("Ho")
         
         # Class tracking setup
         self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
