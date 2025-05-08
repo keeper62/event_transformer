@@ -20,8 +20,8 @@ class AbstractBGLDataset(Dataset, ABC):
                 (int(i), self.tokenizer(d)) for i, d in group
             ]
             tokens, sequences = zip(*processed)
-            sequences = torch.stack([torch.tensor(seq, dtype=torch.long) for seq in sequences])
-            tokens = torch.tensor(tokens, dtype=torch.long)
+            sequences = torch.stack([torch.tensor(seq, dtype=torch.torch.int16) for seq in sequences])
+            tokens = torch.tensor(tokens, dtype=torch.torch.int16)
             self.grouped_data.append((tokens, sequences))
 
         # Generate adaptive window indices for each group
