@@ -578,6 +578,8 @@ class TransformerLightning(pl.LightningModule):
         self.val_acc.update(preds, targets)
         self._update_f1_approximation(preds, targets)
         
+        self._logger.debug("Normal metrics calculated")
+        
         self.validation_step_outputs.append(loss)
         
         # Update important class metrics
@@ -585,6 +587,8 @@ class TransformerLightning(pl.LightningModule):
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
+                
+        self._logger.debug("Important metrics calculated")
         
         return loss
 
