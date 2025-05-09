@@ -306,6 +306,7 @@ class TransformerLightning(pl.LightningModule):
         self.num_classes = config['model']['vocab_size']
         
         self._logger = setup_logger(self.__class__.__name__)
+        self._logger.debug("Test logger")
         
         # Class tracking setup
         self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
@@ -566,7 +567,6 @@ class TransformerLightning(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
-        batch.to(self.device)
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
