@@ -333,7 +333,6 @@ class TransformerLightning(pl.LightningModule):
         self.top_k = top_k
         self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
-        self._sample_size = 1000
         
         self.class_weights = self._adjust_class_weights(class_weights)
         
@@ -595,6 +594,8 @@ class TransformerLightning(pl.LightningModule):
             if important_mask.any():
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
                 
+        self._track_class_performance(preds, targets)    
+            
         self._logger.debug("Important metrics calculated")
         
         return loss
