@@ -333,6 +333,7 @@ class TransformerLightning(pl.LightningModule):
         self.top_k = top_k
         self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
+        self._sample_size = 1000
         
         self.class_weights = self._adjust_class_weights(class_weights)
         
@@ -439,6 +440,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Track important classes
         if len(self.important_classes) > 0:
+            self.important_classes.to(targets.device)
             important_mask = torch.isin(targets, self.important_classes)
             if important_mask.any():
                 self.important_class_samples.append((
@@ -587,6 +589,7 @@ class TransformerLightning(pl.LightningModule):
         # Update important class metrics
         if len(self.important_classes) > 0:
             self._logger.debug(f"Final devices - targets: {targets.device}, important_classes: {self.important_classes.device}")
+            self.important_classes.to(targets.device)
             important_mask = torch.isin(targets, self.important_classes)
             self._logger.debug("Test 3")
             if important_mask.any():
