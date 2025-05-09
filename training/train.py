@@ -564,7 +564,9 @@ class TransformerLightning(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
+        self._logger.debug("Now calculating loss")
         loss = self.loss_fn(logits, targets)
+        self._logger.debug("Loss calculated")
         preds = logits.argmax(dim=-1)
         
         # Flatten if needed
