@@ -329,7 +329,7 @@ class TransformerLightning(pl.LightningModule):
         self._logger.info("Initializing transformer model")
         
         # Class tracking setup
-        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
+        self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
         self.top_k = top_k
         self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
