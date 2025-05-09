@@ -305,8 +305,7 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self._logger = setup_logger(self.__class__.__name__)
-        self._logger.debug("Test logger")
+        self.logger.debug("Test logger")
         
         # Class tracking setup
         self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
@@ -332,10 +331,10 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
-        self._logger.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
+        self.logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        self.logger.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
         output = self.model(inputs, sequences)
-        self._logger.debug(f"Model output shape: {output.shape}")
+        self.logger.debug(f"Model output shape: {output.shape}")
         return output
     
     def _init_tracking_structures(self):
@@ -485,21 +484,21 @@ class TransformerLightning(pl.LightningModule):
     def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
         """Debug helper to check tensor devices"""
         devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
-        self._logger.debug(f"Devices: {devices}")
+        self.logger.debug(f"Devices: {devices}")
         if len(devices) > 1:
             error_msg = f"Device mismatch detected. Found devices: {devices}\n"
             error_msg += "Tensor details:\n"
             for i, t in enumerate(tensors):
                 if isinstance(t, torch.Tensor):
                     error_msg += f"  Tensor {i}: device={t.device}, shape={t.shape}, dtype={t.dtype}\n"
-            self._logger.error(error_msg)
+            self.logger.error(error_msg)
             raise RuntimeError(error_msg)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         
         # Debug device consistency
-        self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
+        self.logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
         
         device = inputs.device
         outputs = []
@@ -534,7 +533,7 @@ class TransformerLightning(pl.LightningModule):
         final_outputs = outputs.reshape(-1, self.num_classes)
         final_targets = targets.reshape(-1)
         
-        self._logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
+        self.logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
         
         final_targets = targets.reshape(-1)
         
