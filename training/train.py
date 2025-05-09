@@ -298,7 +298,7 @@ class DataModule(pl.LightningDataModule):
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
-                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20):
+                 important_classes: torch.Tensor | None = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights', 'important_classes'])
         
@@ -311,59 +311,51 @@ class TransformerLightning(pl.LightningModule):
         )
         self.template_miner.load_state()
         self.config_name = config_name
-        self.num_classes = config['model']['vocab_size']
-        
-        # Module-specific logger
-        self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self._logger.setLevel(logging.DEBUG)
-        
-        # File handler (only added by rank 0 to avoid duplicate logs)
-        file_handler = logging.FileHandler("training.log")
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-
-            
-        self._logger.info("Initializing transformer model")
+        self.num_classes = config['model']['vocab_size']  # 6220 classes
         
         # Class tracking setup
         self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
-        self.top_k = top_k
-        self.bottom_k = bottom_k
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
         
         self.class_weights = self._adjust_class_weights(class_weights)
         
-        # Initialize metrics
+        # Initialize all metric trackers
         self._init_metrics()
-        self._init_tracking_structures()
         
-        # Loss function
+        # Loss function and tracking
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
             reduction='mean'
         )
-        
-        # Training state
-        self.best_val_loss = float('inf')
-        self.validation_step_outputs = []
+        self.validation_step_outputs = []  # For storing validation losses
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        output = self.model(inputs, sequences)
-        return output
-    
-    def _init_tracking_structures(self):
-        """Initialize structures for tracking class performance"""
-        # For important classes
-        self.important_class_samples = []
+        return self.model(inputs, sequences) 
+
+    def _init_metrics(self):
+        """Initialize all metric tracking buffers with proper sizes"""
+        # Core accuracy metrics
+        self.register_buffer("val_correct", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("val_total", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("top5_correct", torch.tensor(0, dtype=torch.long))
         
-        # For top/bottom k classes
-        self.class_counts = torch.zeros(self.num_classes, dtype=torch.long, device=self.device)
-        self.top_bottom_samples = []
-        self._sample_size = 1000  # Samples to keep for analysis
+        # For approximate metrics (track 100 random classes each epoch)
+        self.register_buffer("_confusion_counts", torch.zeros((100, 100), dtype=torch.long))
+        self.register_buffer("_sampled_classes", torch.zeros(100, dtype=torch.long))  # Classes we're tracking this epoch
+        
+        # For tracking which classes we've seen
+        self.register_buffer("_class_sample_counts", torch.zeros(self.num_classes, dtype=torch.long))
+        
+        # For important classes (if specified)
+        if len(self.important_classes) > 0:
+            num_important = len(self.important_classes)
+            self.register_buffer("_important_correct", torch.zeros(num_important, dtype=torch.long))
+            self.register_buffer("_important_total", torch.zeros(num_important, dtype=torch.long))
+        else:
+            # Initialize empty tensors if no important classes
+            self.register_buffer("_important_correct", torch.tensor([], dtype=torch.long))
+            self.register_buffer("_important_total", torch.tensor([], dtype=torch.long))
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -374,164 +366,6 @@ class TransformerLightning(pl.LightningModule):
             valid_classes = self.important_classes[valid_mask]
             adjusted_weights[valid_classes] *= self.importance_boost_factor
         return adjusted_weights
-
-    def _init_metrics(self):
-        """Initialize memory-efficient metrics"""
-        common_args = {
-            'task': 'multiclass',
-            'num_classes': self.num_classes,
-            'sync_on_compute': False
-        }
-        
-        # Core metrics
-        self.val_acc = torchmetrics.Accuracy(**common_args, average='micro')
-        
-        # Lightweight F1 approximation
-        self._f1_samples = []  # Store (correct, pred, target) tuples
-        self._f1_sample_size = 1000  # Number of samples to keep
-        
-        # Important class tracking
-        if len(self.important_classes) > 0:
-            self.val_important_acc = torchmetrics.Accuracy(**common_args)
-            
-    def _update_f1_approximation(self, preds, targets):
-        """Store samples for F1 approximation"""
-        if len(self._f1_samples) < self._f1_sample_size:
-            # Store (is_correct, predicted_class, true_class)
-            is_correct = (preds == targets).float()
-            samples = torch.stack([is_correct, preds.float(), targets.float()], dim=1)
-            self._f1_samples.append(samples)
-            
-    def _compute_approximate_f1(self):
-        """Compute approximate F1 score from samples"""
-        if not self._f1_samples:
-            return torch.tensor(0.0, device=self.device)
-        
-        samples = torch.cat(self._f1_samples)
-        is_correct = samples[:, 0]
-        preds = samples[:, 1].long()
-        targets = samples[:, 2].long()
-        
-        # Compute precision and recall approximation
-        true_pos = is_correct.sum()
-        pred_pos = len(preds)
-        actual_pos = len(targets)
-        
-        precision = true_pos / pred_pos
-        recall = true_pos / actual_pos
-        
-        return 2 * (precision * recall) / (precision + recall + 1e-8)
-            
-    def _track_class_performance(self, preds: torch.Tensor, targets: torch.Tensor):
-        """Track samples for important and top/bottom classes with proper device handling"""
-        # Ensure tensors are on the same device
-        device = targets.device
-        
-        # Update class counts (ensure counts tensor is on correct device)
-        unique, counts = torch.unique(targets, return_counts=True)
-        self.class_counts = self.class_counts.to(device)
-        self.class_counts[unique] += counts.to(device)
-        
-        # Sample data for analysis
-        if len(preds) > self._sample_size:
-            indices = torch.randperm(len(preds), device=device)[:self._sample_size]
-            preds = preds[indices]
-            targets = targets[indices]
-        
-        # Track important classes (with device-safe isin implementation)
-        if len(self.important_classes) > 0:
-            # Move important_classes to correct device
-            important_classes = self.important_classes.to(device)
-            
-            # Device-safe mask creation
-            if torch.__version__ >= '2.2':
-                important_mask = torch.isin(targets, important_classes)
-            else:
-                # Fallback for PyTorch < 2.2
-                important_mask = torch.isin(targets.cpu(), important_classes.cpu()).to(device)
-            
-            if important_mask.any():
-                self.important_class_samples.append((
-                    preds[important_mask],
-                    targets[important_mask]
-                ))
-        
-        # Track top/bottom k classes (with proper device handling)
-        current_counts = self.class_counts.cpu().numpy()  # numpy works on CPU
-        top_classes = np.argpartition(-current_counts, self.top_k)[:self.top_k]
-        bottom_classes = np.argpartition(current_counts, self.bottom_k)[:self.bottom_k]
-        
-        # Create track_classes tensor on the correct device
-        track_classes = torch.tensor(
-            np.concatenate([top_classes, bottom_classes]),
-            device=device
-        )
-        
-        # Device-safe mask creation for tracking
-        if torch.__version__ >= '2.2':
-            track_mask = torch.isin(targets, track_classes)
-        else:
-            track_mask = torch.isin(targets.cpu(), track_classes.cpu()).to(device)
-        
-        if track_mask.any():
-            self.top_bottom_samples.append((
-                preds[track_mask],
-                targets[track_mask]
-            ))
-
-    def _compute_tracked_confusion(self, samples, 
-                                 classes: torch.Tensor) -> torch.Tensor:
-        """Compute confusion matrix for tracked classes"""
-        if not samples:
-            return None
-            
-        all_preds, all_targets = zip(*samples)
-        preds = torch.cat(all_preds)
-        targets = torch.cat(all_targets)
-        
-        # Filter to only the specified classes
-        mask = torch.isin(targets, classes)
-        if not mask.any():
-            return None
-            
-        preds = preds[mask]
-        targets = targets[mask]
-        
-        # Create mapping to contiguous indices
-        unique_classes = classes.unique()
-        class_map = {cls.item(): i for i, cls in enumerate(unique_classes)}
-        
-        mapped_targets = torch.tensor([class_map[t.item()] for t in targets], 
-                                    device=targets.device)
-        mapped_preds = torch.tensor([class_map[p.item()] for p in preds], 
-                                   device=preds.device)
-        
-        return torchmetrics.functional.confusion_matrix(
-            mapped_preds, mapped_targets,
-            task='multiclass',
-            num_classes=len(unique_classes),
-            normalize='true'
-        )
-        
-    def _init_important_metrics(self):
-        """Initialize only the important-class-specific metrics"""
-        # Using separate metric objects for cleaner reset
-        self.val_important_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes)
-        self.val_important_precision = torchmetrics.Precision(task="multiclass", num_classes=self.num_classes, average='none')
-        self.val_important_recall = torchmetrics.Recall(task="multiclass", num_classes=self.num_classes, average='none')
-
-    def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
-        """Debug helper to check tensor devices"""
-        devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
-        self._logger.debug(f"Devices: {devices}")
-        if len(devices) > 1:
-            error_msg = f"Device mismatch detected. Found devices: {devices}\n"
-            error_msg += "Tensor details:\n"
-            for i, t in enumerate(tensors):
-                if isinstance(t, torch.Tensor):
-                    error_msg += f"  Tensor {i}: device={t.device}, shape={t.shape}, dtype={t.dtype}\n"
-            self._logger.debug(error_msg)
-            raise RuntimeError(error_msg)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
@@ -568,60 +402,121 @@ class TransformerLightning(pl.LightningModule):
         outputs = torch.stack(outputs, dim=1).float()
         final_targets = targets.reshape(-1)
         
-        # Final device check before return
-        self._validate_device_consistency(outputs, final_targets)
         return outputs, final_targets
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        self._logger.debug("Now calculating loss")
         loss = self.loss_fn(logits, targets)
-        self._logger.debug("Loss calculated")
-        preds = logits.argmax(dim=-1)
         
-        # Flatten if needed
-        if logits.dim() == 3:
-            preds = preds.view(-1)
-            targets = targets.view(-1)
+        # Store loss for epoch aggregation
+        self.validation_step_outputs.append(loss.detach())
         
-        # Update core metrics
-        self.val_acc.update(preds, targets)
-        self._update_f1_approximation(preds, targets)
+        # Get predictions
+        preds = logits.argmax(dim=-1).view(-1)  # Flatten
+        targets = targets.view(-1)
         
-        self._logger.debug("Normal metrics calculated")
+        # Update basic accuracy metrics
+        self.val_correct += (preds == targets).sum()
+        self.val_total += targets.numel()
         
-        self.validation_step_outputs.append(loss)
+        # Update top-5 accuracy
+        _, top5_preds = logits.topk(5, dim=-1)
+        self.top5_correct += (top5_preds.view(-1, 5) == targets.view(-1, 1)).any(dim=-1).sum()
         
-        # Update important class metrics
+        # Update class sample counts (for coverage metric)
+        unique_classes, counts = torch.unique(targets, return_counts=True)
+        self._class_sample_counts[unique_classes] += counts.to(self._class_sample_counts.device)
+        
+        # Sample classes for approximate metrics (10% of batches)
+        if torch.rand(1).item() < 0.1:  # Only process 10% of batches for efficiency
+            # Randomly select 100 classes to track this batch
+            self._sampled_classes.random_(0, self.num_classes)
+            
+            # Get predictions/targets for sampled classes
+            mask = torch.isin(targets, self._sampled_classes)
+            if mask.any():
+                sampled_preds = preds[mask]
+                sampled_targets = targets[mask]
+                
+                # Update confusion matrix
+                for p, t in zip(sampled_preds, sampled_targets):
+                    # Find positions in our sampled classes
+                    p_pos = (self._sampled_classes == p).nonzero(as_tuple=True)[0]
+                    t_pos = (self._sampled_classes == t).nonzero(as_tuple=True)[0]
+                    
+                    if p_pos.numel() > 0 and t_pos.numel() > 0:
+                        self._confusion_counts[p_pos[0], t_pos[0]] += 1
+        
+        # Track important classes (if any)
         if len(self.important_classes) > 0:
-            # 1. Ensure both tensors are on CPU for isin()
-            targets_cpu = targets.cpu()
-            important_classes_cpu = self.important_classes.cpu()
-            
-            # 2. Create mask on CPU
-            important_mask_cpu = torch.isin(targets_cpu, important_classes_cpu)
-            
-            # 3. For metric update: keep everything on CPU
-            preds_cpu = preds.cpu()
-            targets_cpu = targets.cpu()
-            
-            # 4. Update metric on CPU (temporarily)
-            if important_mask_cpu.any():
-                self.val_important_acc.to('cpu')
-                self.val_important_acc.update(preds_cpu[important_mask_cpu], targets_cpu[important_mask_cpu])
-                self.val_important_acc.to(targets.device)  # Move metric back to original device
-
-        self._track_class_performance(preds, targets)    
-            
-        self._logger.debug("Important metrics calculated")
+            important_mask = torch.isin(targets, self.important_classes)
+            if important_mask.any():
+                important_preds = preds[important_mask]
+                important_targets = targets[important_mask]
+                
+                # For each important class, track correct/total
+                for i, cls in enumerate(self.important_classes):
+                    cls_mask = (important_targets == cls)
+                    self._important_correct[i] += (important_preds[cls_mask] == cls).sum()
+                    self._important_total[i] += cls_mask.sum()
         
         return loss
+    
+    def on_validation_epoch_end(self):
+        # Calculate average loss
+        avg_loss = torch.stack(self.validation_step_outputs).mean()
+        self.validation_step_outputs.clear()  # Free memory
+        
+        metrics = {
+            'val/loss': avg_loss,
+            'val/acc': self.val_correct.float() / self.val_total,
+            'val/top5_acc': self.top5_correct.float() / self.val_total,
+            'val/class_coverage': (self._class_sample_counts > 0).sum().float() / self.num_classes
+        }
+        
+        # Approximate F1 from sampled confusion matrix
+        if self._confusion_counts.sum() > 0:
+            tp = self._confusion_counts.diag().float()
+            pred_pos = self._confusion_counts.sum(0).float()
+            true_pos = self._confusion_counts.sum(1).float()
+            
+            precision = tp / (pred_pos + 1e-8)
+            recall = tp / (true_pos + 1e-8)
+            f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+            
+            metrics.update({
+                'val/approx_precision': precision.mean(),
+                'val/approx_recall': recall.mean(),
+                'val/approx_f1': f1.mean()
+            })
+        
+        # Important class metrics (if any)
+        if len(self.important_classes) > 0 and self._important_total.sum() > 0:
+            important_acc = self._important_correct.float() / (self._important_total.float() + 1e-8)
+            metrics.update({
+                'val/important_acc_mean': important_acc.mean(),
+                'val/important_acc_min': important_acc.min(),
+                'val/important_acc_max': important_acc.max()
+            })
+        
+        self.log_dict(metrics, prog_bar=True)
+        self._reset_metrics()
+        
+    def _reset_metrics(self):
+        """Reset all metric trackers for next epoch"""
+        self.val_correct.zero_()
+        self.val_total.zero_()
+        self.top5_correct.zero_()
+        self._confusion_counts.zero_()
+        self._class_sample_counts.zero_()
+        
+        if len(self.important_classes) > 0:
+            self._important_correct.zero_()
+            self._important_total.zero_()
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        self._logger.debug("Now calculating loss")
         loss = self.loss_fn(logits, targets)
-        self._logger.debug("Loss calculated")
         
         return loss
     
@@ -636,189 +531,7 @@ class TransformerLightning(pl.LightningModule):
                 process = psutil.Process()
                 logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
                 logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
-    
-    def on_validation_epoch_end(self):
-        try:
-            # 1. Device Management Setup
-            current_device = self.device
-            self._logger.debug(f"Starting validation epoch end on device: {current_device}")
-            
-            # 2. Safely prepare metrics
-            try:
-                loss_tensor = torch.stack([x.to(current_device, non_blocking=True) 
-                                        for x in self.validation_step_outputs])
-                metrics = {
-                    'val/loss': loss_tensor.mean(),
-                    'val/acc': self._safe_metric_compute(self.val_acc),
-                    'val/approx_f1': self._compute_approximate_f1().to(current_device)
-                }
-            except RuntimeError as e:
-                self._logger.error(f"Error preparing base metrics: {str(e)}")
-                raise
 
-            # 3. Important Classes Metrics
-            if len(self.important_classes) > 0:
-                try:
-                    metrics.update(self._compute_important_class_metrics(current_device))
-                except Exception as e:
-                    self._logger.error(f"Error computing important class metrics: {str(e)}")
-                    raise
-
-            # 4. Top/Bottom Classes Metrics
-            try:
-                metrics.update(self._compute_top_bottom_metrics(current_device))
-            except Exception as e:
-                self._logger.error(f"Error computing top/bottom metrics: {str(e)}")
-                raise
-
-            # 5. Final Logging and Cleanup
-            self.log_dict(metrics, prog_bar=True)
-            self._reset_metrics()
-            self._reset_tracking()
-
-        except Exception as e:
-            self._logger.critical(f"Validation epoch end failed: {str(e)}")
-            raise RuntimeError(f"Validation failed: {str(e)}") from e
-
-    # Helper Methods
-    def _safe_metric_compute(self, metric):
-        """Safely compute metric with device handling"""
-        try:
-            return metric.compute().to(self.device)
-        except Exception as e:
-            self._logger.error(f"Metric compute failed: {str(e)}")
-            return torch.tensor(float('nan'), device=self.device)
-
-    def _compute_important_class_metrics(self, device):
-        """Compute metrics for important classes with error handling"""
-        metrics = {}
-        important_classes = self.important_classes.to(device)
-        
-        # Compute accuracy
-        metrics['val/important_acc'] = self._safe_metric_compute(self.val_important_acc)
-        
-        # Process samples with device safety
-        samples = []
-        for p, t in self.important_class_samples:
-            try:
-                samples.append((p.to(device, non_blocking=True), 
-                            t.to(device, non_blocking=True)))
-            except RuntimeError as e:
-                self._logger.warning(f"Skipping corrupted sample: {str(e)}")
-                continue
-        
-        # Compute confusion matrix
-        confmat = self._compute_tracked_confusion(samples, important_classes)
-        if confmat is not None:
-            self.important_class_confmat = confmat.to(device)
-            
-            # Per-class metrics
-            for i, cls in enumerate(important_classes):
-                try:
-                    cls_idx = i
-                    tp = confmat[cls_idx, cls_idx]
-                    fp = confmat[:, cls_idx].sum() - tp
-                    fn = confmat[cls_idx, :].sum() - tp
-                    
-                    precision = tp / (tp + fp + 1e-8)
-                    recall = tp / (tp + fn + 1e-8)
-                    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-                    
-                    metrics.update({
-                        f'val/important_{cls.item()}_precision': precision,
-                        f'val/important_{cls.item()}_recall': recall,
-                        f'val/important_{cls.item()}_f1': f1
-                    })
-                except Exception as e:
-                    self._logger.warning(f"Failed metrics for class {cls}: {str(e)}")
-                    continue
-                    
-        return metrics
-
-    def _compute_top_bottom_metrics(self, device):
-        """Compute top/bottom class metrics with error handling"""
-        metrics = {}
-        
-        # Get class counts with device safety
-        try:
-            counts = self.class_counts.to(device)
-            top_classes = torch.topk(counts, self.top_k).indices
-            bottom_classes = torch.topk(-counts, self.bottom_k).indices
-            tracked_classes = torch.cat([top_classes, bottom_classes])
-        except Exception as e:
-            self._logger.error(f"Class ranking failed: {str(e)}")
-            return metrics
-        
-        # Process samples
-        samples = []
-        for p, t in self.top_bottom_samples:
-            try:
-                samples.append((p.to(device, non_blocking=True), 
-                            t.to(device, non_blocking=True)))
-            except RuntimeError as e:
-                self._logger.warning(f"Skipping corrupted sample: {str(e)}")
-                continue
-        
-        # Compute confusion matrix
-        confmat = self._compute_tracked_confusion(samples, tracked_classes)
-        if confmat is not None:
-            self.top_bottom_confmat = confmat.to(device)
-            num_top = len(top_classes)
-            
-            # Top classes metrics
-            for i, cls in enumerate(top_classes):
-                try:
-                    cls_idx = i
-                    tp = confmat[cls_idx, cls_idx]
-                    fp = confmat[:, cls_idx].sum() - tp
-                    fn = confmat[cls_idx, :].sum() - tp
-                    
-                    precision = tp / (tp + fp + 1e-8)
-                    recall = tp / (tp + fn + 1e-8)
-                    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-                    
-                    metrics.update({
-                        f'val/top_{i}_acc': tp / (tp + fn + 1e-8),
-                        f'val/top_{i}_precision': precision,
-                        f'val/top_{i}_recall': recall,
-                        f'val/top_{i}_f1': f1
-                    })
-                except Exception as e:
-                    self._logger.warning(f"Failed top class {i} metrics: {str(e)}")
-                    continue
-            
-            # Bottom classes metrics
-            for j, cls in enumerate(bottom_classes):
-                try:
-                    cls_idx = num_top + j
-                    tp = confmat[cls_idx, cls_idx]
-                    fp = confmat[:, cls_idx].sum() - tp
-                    fn = confmat[cls_idx, :].sum() - tp
-                    
-                    metrics.update({
-                        f'val/bottom_{j}_acc': tp / (tp + fn + 1e-8),
-                        f'val/bottom_{j}_precision': tp / (tp + fp + 1e-8),
-                        f'val/bottom_{j}_recall': tp / (tp + fn + 1e-8),
-                        f'val/bottom_{j}_f1': 2*tp/(2*tp + fp + fn + 1e-8)
-                    })
-                except Exception as e:
-                    self._logger.warning(f"Failed bottom class {j} metrics: {str(e)}")
-                    continue
-                    
-        return metrics
-
-    def _reset_tracking(self):
-        """Reset tracking structures for next epoch"""
-        self.important_class_samples.clear()
-        self.top_bottom_samples.clear()
-        self.class_counts.zero_()
-
-    def _reset_metrics(self):
-        """Reset metrics"""
-        self.val_acc.reset()
-        self._f1_samples.clear()
-        if len(self.important_classes) > 0:
-            self.val_important_acc.reset()
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
