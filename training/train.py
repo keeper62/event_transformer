@@ -51,6 +51,8 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.alpha = alpha
         self.reduction = reduction
+        
+        self._logger = setup_logger(self.__class__.__name__)
 
     def forward(self, inputs, targets):
         """
@@ -64,7 +66,7 @@ class FocalLoss(nn.Module):
             targets = targets.reshape(-1)  # [N*L]
         
         # Debug shapes
-        logging.debug(f"FocalLoss shapes - inputs: {inputs.shape}, targets: {targets.shape}")
+        self._logger.debug(f"FocalLoss shapes - inputs: {inputs.shape}, targets: {targets.shape}")
         
         # Convert logits to probabilities
         probs = F.softmax(inputs, dim=1)
@@ -84,6 +86,8 @@ class FocalLoss(nn.Module):
             ce_loss = alpha_t.unsqueeze(1) * ce_loss
         
         loss = focal_weight.unsqueeze(1) * ce_loss
+        
+        self._logger.debug("Loss calculated!")
         
         if self.reduction == 'mean':
             return loss.mean()
