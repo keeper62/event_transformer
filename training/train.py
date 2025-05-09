@@ -430,10 +430,11 @@ class TransformerLightning(pl.LightningModule):
         # Sample classes for approximate metrics (10% of batches)
         if torch.rand(1).item() < 0.1:  # Only process 10% of batches for efficiency
             # Randomly select 100 classes to track this batch
+            self._sampled_classes = self._sampled_classes.to(targets)
             self._sampled_classes.random_(0, self.num_classes)
             
             # Get predictions/targets for sampled classes
-            mask = torch.isin(targets, self._sampled_classes)
+            mask = torch.isin(targets, self._sampled_classes).cpu()
             if mask.any():
                 sampled_preds = preds[mask]
                 sampled_targets = targets[mask]
@@ -447,9 +448,10 @@ class TransformerLightning(pl.LightningModule):
                     if p_pos.numel() > 0 and t_pos.numel() > 0:
                         self._confusion_counts[p_pos[0], t_pos[0]] += 1
         
+        self.important_classes = self.important_classes.to(targets)
         # Track important classes (if any)
         if len(self.important_classes) > 0:
-            important_mask = torch.isin(targets, self.important_classes)
+            important_mask = torch.isin(targets, self.important_classes).cpu()
             if important_mask.any():
                 important_preds = preds[important_mask]
                 important_targets = targets[important_mask]
