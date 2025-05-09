@@ -307,7 +307,21 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']
         
-        self._logging = logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)
+        # Module-specific logger
+        self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self._logger.setLevel(logging.DEBUG)
+        
+        # File handler (only added by rank 0 to avoid duplicate logs)
+        if self._should_add_handlers():
+            file_handler = logging.FileHandler("training.log")
+            file_handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            file_handler.setFormatter(formatter)
+            self._logger.addHandler(file_handler)
+            
+        self._logger.info("Initializing transformer model")
         
         # Class tracking setup
         self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
@@ -333,10 +347,10 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        self._logging.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
-        self._logging.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
+        self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        self._logger.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
         output = self.model(inputs, sequences)
-        self._logging.debug(f"Model output shape: {output.shape}")
+        self._logger.debug(f"Model output shape: {output.shape}")
         return output
     
     def _init_tracking_structures(self):
