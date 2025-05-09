@@ -585,15 +585,24 @@ class TransformerLightning(pl.LightningModule):
         
         self._logger.debug("Test 2")
         
-        # GPU-only alternative (may be faster)
+        # Update important class metrics
         if len(self.important_classes) > 0:
-            important_classes = self.important_classes.to(targets.device)
-            important_mask = torch.zeros_like(targets, dtype=torch.bool)
-            for cls in important_classes:
-                important_mask |= (targets == cls)
+            # 1. Ensure both tensors are on CPU for isin()
+            targets_cpu = targets.cpu()
+            important_classes_cpu = self.important_classes.cpu()
             
-            if important_mask.any():
-                self.val_important_acc.update(preds[important_mask], targets[important_mask])
+            # 2. Create mask on CPU
+            important_mask_cpu = torch.isin(targets_cpu, important_classes_cpu)
+            
+            # 3. For metric update: keep everything on CPU
+            preds_cpu = preds.cpu()
+            targets_cpu = targets.cpu()
+            
+            # 4. Update metric on CPU (temporarily)
+            if important_mask_cpu.any():
+                self.val_important_acc.to('cpu')
+                self.val_important_acc.update(preds_cpu[important_mask_cpu], targets_cpu[important_mask_cpu])
+                self.val_important_acc.to(targets.device)  # Move metric back to original device
                 
         self._track_class_performance(preds, targets)    
             
