@@ -45,6 +45,68 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     
     return logger
 
+from torchmetrics import Metric
+import torch
+
+class HashedF1(Metric):
+    def __init__(self, num_buckets: int = 100):
+        super().__init__()
+        self.num_buckets = num_buckets
+        
+        # States for TP, FP, FN (using torch.Tensor)
+        self.add_state("tp", default=torch.zeros(num_buckets, dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state("fp", default=torch.zeros(num_buckets, dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state("fn", default=torch.zeros(num_buckets, dtype=torch.long), dist_reduce_fx="sum")
+        
+        # Pre-compute hash parameters
+        self.register_buffer("hash_prime", torch.tensor(2654435761, dtype=torch.long))  # Large prime number
+
+    def _hash_class(self, class_idx: torch.Tensor) -> torch.Tensor:
+        """GPU-compatible hashing using multiplicative hashing"""
+        return (class_idx * self.hash_prime) % self.num_buckets
+
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        # Move to CPU if needed (hashing is faster on CPU)
+        if preds.is_cuda:
+            preds_cpu = preds.cpu()
+            targets_cpu = targets.cpu()
+        else:
+            preds_cpu = preds
+            targets_cpu = targets
+        
+        # Vectorized hashing
+        pred_hashes = self._hash_class(preds_cpu)
+        target_hashes = self._hash_class(targets_cpu)
+        
+        # Calculate matches
+        matches = (preds_cpu == targets_cpu)
+        
+        # Update TP (correct predictions)
+        unique_tp, counts_tp = torch.unique(pred_hashes[matches], return_counts=True)
+        self.tp[unique_tp] += counts_tp.to(self.tp.device)
+        
+        # Update FP (wrong predictions)
+        unique_fp, counts_fp = torch.unique(pred_hashes[~matches], return_counts=True)
+        self.fp[unique_fp] += counts_fp.to(self.fp.device)
+        
+        # Update FN (missed predictions)
+        unique_fn, counts_fn = torch.unique(target_hashes[~matches], return_counts=True)
+        self.fn[unique_fn] += counts_fn.to(self.fn.device)
+
+    def compute(self):
+        total_tp = self.tp.sum().float()
+        total_fp = self.fp.sum().float()
+        total_fn = self.fn.sum().float()
+        
+        precision = total_tp / (total_tp + total_fp + 1e-8)
+        recall = total_tp / (total_tp + total_fn + 1e-8)
+        return 2 * (precision * recall) / (precision + recall + 1e-8)
+
+    def reset(self):
+        self.tp.zero_()
+        self.fp.zero_()
+        self.fn.zero_()
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
         super().__init__()
@@ -313,49 +375,26 @@ class TransformerLightning(pl.LightningModule):
         self.config_name = config_name
         self.num_classes = config['model']['vocab_size']  # 6220 classes
         
+        # Initialize metrics
+        self.val_f1 = HashedF1(num_buckets=1000)  # More buckets = better accuracy
+        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes)
+        self.val_top5 = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes, top_k=5)
+        
         # Class tracking setup
-        self.important_classes = important_classes.long().to(self.device) if important_classes is not None else torch.tensor([], dtype=torch.long, device=self.device)
+        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long)
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
         
         self.class_weights = self._adjust_class_weights(class_weights)
         
-        # Initialize all metric trackers
-        self._init_metrics()
-        
-        # Loss function and tracking
+        # Loss function
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
             reduction='mean'
         )
-        self.validation_step_outputs = []  # For storing validation losses
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(inputs, sequences) 
-
-    def _init_metrics(self):
-        """Initialize all metric tracking buffers with proper sizes"""
-        # Core accuracy metrics
-        self.register_buffer("val_correct", torch.tensor(0, dtype=torch.long))
-        self.register_buffer("val_total", torch.tensor(0, dtype=torch.long))
-        self.register_buffer("top5_correct", torch.tensor(0, dtype=torch.long))
-        
-        # For approximate metrics (track 100 random classes each epoch)
-        self.register_buffer("_confusion_counts", torch.zeros((100, 100), dtype=torch.long))
-        self.register_buffer("_sampled_classes", torch.zeros(100, dtype=torch.long))  # Classes we're tracking this epoch
-        
-        # For tracking which classes we've seen
-        self.register_buffer("_class_sample_counts", torch.zeros(self.num_classes, dtype=torch.long))
-        
-        # For important classes (if specified)
-        if len(self.important_classes) > 0:
-            num_important = len(self.important_classes)
-            self.register_buffer("_important_correct", torch.zeros(num_important, dtype=torch.long))
-            self.register_buffer("_important_total", torch.zeros(num_important, dtype=torch.long))
-        else:
-            # Initialize empty tensors if no important classes
-            self.register_buffer("_important_correct", torch.tensor([], dtype=torch.long))
-            self.register_buffer("_important_total", torch.tensor([], dtype=torch.long))
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -408,118 +447,37 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Store loss for epoch aggregation
-        self.validation_step_outputs.append(loss.detach())
-        
         # Get predictions
-        preds = logits.argmax(dim=-1).view(-1)  # Flatten
+        preds = logits.argmax(dim=-1).view(-1)
         targets = targets.view(-1)
         
-        # Update basic accuracy metrics
-        self.val_correct += (preds == targets).sum()
-        self.val_total += targets.numel()
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True)
         
-        # Update top-5 accuracy
-        _, top5_preds = logits.topk(5, dim=-1)
-        self.top5_correct += (top5_preds.view(-1, 5) == targets.view(-1, 1)).any(dim=-1).sum()
-        
-        # Update class sample counts (for coverage metric)
-        unique_classes, counts = torch.unique(targets, return_counts=True)
-        self._class_sample_counts[unique_classes] += counts.to(self._class_sample_counts.device)
-        
-        # Sample classes for approximate metrics (10% of batches)
-        if torch.rand(1).item() < 0.1:  # Only process 10% of batches for efficiency
-            # Randomly select 100 classes to track this batch
-            self._sampled_classes = self._sampled_classes.to(targets)
-            self._sampled_classes.random_(0, self.num_classes)
-            
-            # Get predictions/targets for sampled classes
-            mask = torch.isin(targets, self._sampled_classes).cpu()
-            if mask.any():
-                sampled_preds = preds[mask]
-                sampled_targets = targets[mask]
-                
-                # Update confusion matrix
-                for p, t in zip(sampled_preds, sampled_targets):
-                    # Find positions in our sampled classes
-                    p_pos = (self._sampled_classes == p).nonzero(as_tuple=True)[0]
-                    t_pos = (self._sampled_classes == t).nonzero(as_tuple=True)[0]
-                    
-                    if p_pos.numel() > 0 and t_pos.numel() > 0:
-                        self._confusion_counts[p_pos[0], t_pos[0]] += 1
-        
-        self.important_classes = self.important_classes.to(targets)
-        # Track important classes (if any)
-        if len(self.important_classes) > 0:
-            important_mask = torch.isin(targets, self.important_classes).cpu()
-            if important_mask.any():
-                important_preds = preds[important_mask]
-                important_targets = targets[important_mask]
-                
-                # For each important class, track correct/total
-                for i, cls in enumerate(self.important_classes):
-                    cls_mask = (important_targets == cls)
-                    self._important_correct[i] += (important_preds[cls_mask] == cls).sum()
-                    self._important_total[i] += cls_mask.sum()
+        # Update metrics
+        self.val_acc(preds, targets)
+        self.val_top5(logits.view(-1, self.num_classes), targets)  # Needs unflattened logits
+        self.val_f1(preds, targets)
         
         return loss
-    
+
     def on_validation_epoch_end(self):
-        # Calculate average loss
-        avg_loss = torch.stack(self.validation_step_outputs).mean()
-        self.validation_step_outputs.clear()  # Free memory
+        # Log all metrics
+        self.log_dict({
+            'val/acc': self.val_acc.compute(),
+            'val/top5_acc': self.val_top5.compute(),
+            'val/f1': self.val_f1.compute()
+        }, prog_bar=True)
         
-        metrics = {
-            'val/loss': avg_loss,
-            'val/acc': self.val_correct.float() / self.val_total,
-            'val/top5_acc': self.top5_correct.float() / self.val_total,
-            'val/class_coverage': (self._class_sample_counts > 0).sum().float() / self.num_classes
-        }
-        
-        # Approximate F1 from sampled confusion matrix
-        if self._confusion_counts.sum() > 0:
-            tp = self._confusion_counts.diag().float()
-            pred_pos = self._confusion_counts.sum(0).float()
-            true_pos = self._confusion_counts.sum(1).float()
-            
-            precision = tp / (pred_pos + 1e-8)
-            recall = tp / (true_pos + 1e-8)
-            f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-            
-            metrics.update({
-                'val/approx_precision': precision.mean(),
-                'val/approx_recall': recall.mean(),
-                'val/approx_f1': f1.mean()
-            })
-        
-        # Important class metrics (if any)
-        if len(self.important_classes) > 0 and self._important_total.sum() > 0:
-            important_acc = self._important_correct.float() / (self._important_total.float() + 1e-8)
-            metrics.update({
-                'val/important_acc_mean': important_acc.mean(),
-                'val/important_acc_min': important_acc.min(),
-                'val/important_acc_max': important_acc.max()
-            })
-        
-        self.log_dict(metrics, prog_bar=True, sync_dist=True)
-        self._reset_metrics()
-        
-    def _reset_metrics(self):
-        """Reset all metric trackers for next epoch"""
-        self.val_correct.zero_()
-        self.val_total.zero_()
-        self.top5_correct.zero_()
-        self._confusion_counts.zero_()
-        self._class_sample_counts.zero_()
-        
-        if len(self.important_classes) > 0:
-            self._important_correct.zero_()
-            self._important_total.zero_()
+        # Reset metrics
+        self.val_acc.reset()
+        self.val_top5.reset()
+        self.val_f1.reset()
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
     def on_train_batch_start(self, batch, batch_idx):
