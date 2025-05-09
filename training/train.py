@@ -501,7 +501,7 @@ class TransformerLightning(pl.LightningModule):
                 'val/important_acc_max': important_acc.max()
             })
         
-        self.log_dict(metrics, prog_bar=True)
+        self.log_dict(metrics, prog_bar=True, sync_dist=True)
         self._reset_metrics()
         
     def _reset_metrics(self):
