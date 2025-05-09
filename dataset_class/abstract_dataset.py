@@ -129,6 +129,9 @@ class AbstractBGLDataset(Dataset, ABC):
         output_window = tokens[input_end:output_end]
         input_sequences = sequences[start_idx:input_end]
         
+        self.logger.debug(f"""Data device types - Input window: {input_window.device}, Output window: {output_window.device}, Input sequence: 
+                          {input_sequences.device}""")
+        
         return input_window, output_window, input_sequences
 
     @abstractmethod

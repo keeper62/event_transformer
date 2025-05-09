@@ -91,6 +91,7 @@ def train_with_config(
     """Train the model with the given configuration."""
     try:
         # Initialize data module
+        logger.debug("Initializing DataModule")
         data_module = DataModule(config, test_mode=test_mode)
         
         # Get vocabulary sizes
@@ -101,12 +102,12 @@ def train_with_config(
         class_weights = data_module.get_class_weights()
         
         # Initialize model with class distribution
+        logger.debug("Initializing model")
         model = TransformerLightning(
             config, 
             config_name, 
             class_weights=class_weights,  # Changed from class_weights
             important_classes=important_errors,
-            logger = logger
         )
 
         # Rest of your training setup remains the same...

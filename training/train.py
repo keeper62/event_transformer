@@ -290,8 +290,7 @@ class DataModule(pl.LightningDataModule):
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
-                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20,
-                 logger = None):
+                 important_classes: torch.Tensor | None = None, top_k: int = 20, bottom_k: int = 20):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights', 'important_classes'])
         
@@ -333,6 +332,7 @@ class TransformerLightning(pl.LightningModule):
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
+        self._logger.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
         output = self.model(inputs, sequences)
         self._logger.debug(f"Model output shape: {output.shape}")
         return output
