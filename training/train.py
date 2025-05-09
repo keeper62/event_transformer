@@ -512,7 +512,7 @@ class TransformerLightning(pl.LightningModule):
             for i, t in enumerate(tensors):
                 if isinstance(t, torch.Tensor):
                     error_msg += f"  Tensor {i}: device={t.device}, shape={t.shape}, dtype={t.dtype}\n"
-            self._logging.debug(error_msg)
+            self._logger.debug(error_msg)
             raise RuntimeError(error_msg)
 
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -588,7 +588,9 @@ class TransformerLightning(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
+        logging.debug("Now calculating loss")
         loss = self.loss_fn(logits, targets)
+        logging.debug("Loss calculated")
         
         return loss
     
