@@ -650,7 +650,7 @@ class TransformerLightning(pl.LightningModule):
                 metrics = {
                     'val/loss': loss_tensor.mean(),
                     'val/acc': self._safe_metric_compute(self.val_acc),
-                    'val/approx_f1': self._safe_compute_approximate_f1().to(current_device)
+                    'val/approx_f1': self._compute_approximate_f1().to(current_device)
                 }
             except RuntimeError as e:
                 self._logger.error(f"Error preparing base metrics: {str(e)}")
