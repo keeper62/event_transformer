@@ -352,10 +352,7 @@ class TransformerLightning(pl.LightningModule):
         self.validation_step_outputs = []
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        self._logger.debug(f"Model input shapes - inputs: {inputs.shape}, sequences: {sequences.shape}")
-        self._logger.debug(f"Model input devices - inputs: {inputs.device}, sequences: {sequences.device}")
         output = self.model(inputs, sequences)
-        self._logger.debug(f"Model output shape: {output.shape}")
         return output
     
     def _init_tracking_structures(self):
@@ -623,7 +620,9 @@ class TransformerLightning(pl.LightningModule):
                 self.val_important_acc.to('cpu')
                 self.val_important_acc.update(preds_cpu[important_mask_cpu], targets_cpu[important_mask_cpu])
                 self.val_important_acc.to(targets.device)  # Move metric back to original device
-                
+        
+        self._logger.debug("Test 3")    
+
         self._track_class_performance(preds, targets)    
             
         self._logger.debug("Important metrics calculated")
