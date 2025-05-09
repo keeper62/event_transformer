@@ -426,35 +426,55 @@ class TransformerLightning(pl.LightningModule):
         return 2 * (precision * recall) / (precision + recall + 1e-8)
             
     def _track_class_performance(self, preds: torch.Tensor, targets: torch.Tensor):
-        """Track samples for important and top/bottom classes"""
-        # Update class counts
+        """Track samples for important and top/bottom classes with proper device handling"""
+        # Ensure tensors are on the same device
+        device = targets.device
+        
+        # Update class counts (ensure counts tensor is on correct device)
         unique, counts = torch.unique(targets, return_counts=True)
-        self.class_counts[unique] += counts
+        self.class_counts = self.class_counts.to(device)
+        self.class_counts[unique] += counts.to(device)
         
         # Sample data for analysis
         if len(preds) > self._sample_size:
-            indices = torch.randperm(len(preds), device=self.device)[:self._sample_size]
+            indices = torch.randperm(len(preds), device=device)[:self._sample_size]
             preds = preds[indices]
             targets = targets[indices]
         
-        # Track important classes
+        # Track important classes (with device-safe isin implementation)
         if len(self.important_classes) > 0:
-            self.important_classes.to(targets.device)
-            important_mask = torch.isin(targets, self.important_classes)
+            # Move important_classes to correct device
+            important_classes = self.important_classes.to(device)
+            
+            # Device-safe mask creation
+            if torch.__version__ >= '2.2':
+                important_mask = torch.isin(targets, important_classes)
+            else:
+                # Fallback for PyTorch < 2.2
+                important_mask = torch.isin(targets.cpu(), important_classes.cpu()).to(device)
+            
             if important_mask.any():
                 self.important_class_samples.append((
                     preds[important_mask],
                     targets[important_mask]
                 ))
         
-        # Track top/bottom k classes
-        current_counts = self.class_counts.cpu().numpy()
+        # Track top/bottom k classes (with proper device handling)
+        current_counts = self.class_counts.cpu().numpy()  # numpy works on CPU
         top_classes = np.argpartition(-current_counts, self.top_k)[:self.top_k]
         bottom_classes = np.argpartition(current_counts, self.bottom_k)[:self.bottom_k]
         
-        track_classes = torch.tensor(np.concatenate([top_classes, bottom_classes]), 
-                                   device=self.device)
-        track_mask = torch.isin(targets, track_classes)
+        # Create track_classes tensor on the correct device
+        track_classes = torch.tensor(
+            np.concatenate([top_classes, bottom_classes]),
+            device=device
+        )
+        
+        # Device-safe mask creation for tracking
+        if torch.__version__ >= '2.2':
+            track_mask = torch.isin(targets, track_classes)
+        else:
+            track_mask = torch.isin(targets.cpu(), track_classes.cpu()).to(device)
         
         if track_mask.any():
             self.top_bottom_samples.append((
