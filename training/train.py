@@ -638,125 +638,174 @@ class TransformerLightning(pl.LightningModule):
                 logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
     
     def on_validation_epoch_end(self):
-        # Ensure all metrics are on the correct device
-        current_device = self.device
-        
-        # Move metrics to current device if needed
-        self.val_acc = self.val_acc.to(current_device)
-        if len(self.important_classes) > 0:
-            self.val_important_acc = self.val_important_acc.to(current_device)
-        
-        # Compute base metrics
-        metrics = {
-            'val/loss': torch.stack([x.to(current_device) for x in self.validation_step_outputs]).mean(),
-            'val/acc': self.val_acc.compute(),
-            'val/approx_f1': self._compute_approximate_f1().to(current_device)
-        }
-        
-        # Compute important class metrics
-        if len(self.important_classes) > 0:
-            # Move important classes to correct device
-            important_classes = self.important_classes.to(current_device)
+        try:
+            # 1. Device Management Setup
+            current_device = self.device
+            self._logger.debug(f"Starting validation epoch end on device: {current_device}")
             
-            # Compute important class accuracy
-            metrics['val/important_acc'] = self.val_important_acc.compute()
+            # 2. Safely prepare metrics
+            try:
+                loss_tensor = torch.stack([x.to(current_device, non_blocking=True) 
+                                        for x in self.validation_step_outputs])
+                metrics = {
+                    'val/loss': loss_tensor.mean(),
+                    'val/acc': self._safe_metric_compute(self.val_acc),
+                    'val/approx_f1': self._safe_compute_approximate_f1().to(current_device)
+                }
+            except RuntimeError as e:
+                self._logger.error(f"Error preparing base metrics: {str(e)}")
+                raise
+
+            # 3. Important Classes Metrics
+            if len(self.important_classes) > 0:
+                try:
+                    metrics.update(self._compute_important_class_metrics(current_device))
+                except Exception as e:
+                    self._logger.error(f"Error computing important class metrics: {str(e)}")
+                    raise
+
+            # 4. Top/Bottom Classes Metrics
+            try:
+                metrics.update(self._compute_top_bottom_metrics(current_device))
+            except Exception as e:
+                self._logger.error(f"Error computing top/bottom metrics: {str(e)}")
+                raise
+
+            # 5. Final Logging and Cleanup
+            self.log_dict(metrics, prog_bar=True)
+            self._reset_metrics()
+            self._reset_tracking()
+
+        except Exception as e:
+            self._logger.critical(f"Validation epoch end failed: {str(e)}")
+            raise RuntimeError(f"Validation failed: {str(e)}") from e
+
+    # Helper Methods
+    def _safe_metric_compute(self, metric):
+        """Safely compute metric with device handling"""
+        try:
+            return metric.compute().to(self.device)
+        except Exception as e:
+            self._logger.error(f"Metric compute failed: {str(e)}")
+            return torch.tensor(float('nan'), device=self.device)
+
+    def _compute_important_class_metrics(self, device):
+        """Compute metrics for important classes with error handling"""
+        metrics = {}
+        important_classes = self.important_classes.to(device)
+        
+        # Compute accuracy
+        metrics['val/important_acc'] = self._safe_metric_compute(self.val_important_acc)
+        
+        # Process samples with device safety
+        samples = []
+        for p, t in self.important_class_samples:
+            try:
+                samples.append((p.to(device, non_blocking=True), 
+                            t.to(device, non_blocking=True)))
+            except RuntimeError as e:
+                self._logger.warning(f"Skipping corrupted sample: {str(e)}")
+                continue
+        
+        # Compute confusion matrix
+        confmat = self._compute_tracked_confusion(samples, important_classes)
+        if confmat is not None:
+            self.important_class_confmat = confmat.to(device)
             
-            # Compute confusion matrix with device handling
-            important_confmat = self._compute_tracked_confusion(
-                [(p.to(current_device), t.to(current_device)) for p, t in self.important_class_samples],
-                important_classes
-            )
-            
-            if important_confmat is not None:
-                self.important_class_confmat = important_confmat.to(current_device)
-                
-                # Compute per-class metrics
-                for i, cls in enumerate(important_classes):
+            # Per-class metrics
+            for i, cls in enumerate(important_classes):
+                try:
                     cls_idx = i
-                    tp = important_confmat[cls_idx, cls_idx]
-                    fp = important_confmat[:, cls_idx].sum() - tp
-                    fn = important_confmat[cls_idx, :].sum() - tp
+                    tp = confmat[cls_idx, cls_idx]
+                    fp = confmat[:, cls_idx].sum() - tp
+                    fn = confmat[cls_idx, :].sum() - tp
                     
                     precision = tp / (tp + fp + 1e-8)
                     recall = tp / (tp + fn + 1e-8)
                     f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
                     
                     metrics.update({
-                        f'val/important_{cls.item()}_precision': precision.to(current_device),
-                        f'val/important_{cls.item()}_recall': recall.to(current_device),
-                        f'val/important_{cls.item()}_f1': f1.to(current_device)
+                        f'val/important_{cls.item()}_precision': precision,
+                        f'val/important_{cls.item()}_recall': recall,
+                        f'val/important_{cls.item()}_f1': f1
                     })
+                except Exception as e:
+                    self._logger.warning(f"Failed metrics for class {cls}: {str(e)}")
+                    continue
+                    
+        return metrics
+
+    def _compute_top_bottom_metrics(self, device):
+        """Compute top/bottom class metrics with error handling"""
+        metrics = {}
         
-        # Compute top/bottom class metrics
-        current_counts = self.class_counts.to(current_device)
-        top_classes = torch.tensor(
-            np.argpartition(-current_counts.cpu().numpy(), self.top_k)[:self.top_k],
-            device=current_device
-        )
-        bottom_classes = torch.tensor(
-            np.argpartition(current_counts.cpu().numpy(), self.bottom_k)[:self.bottom_k],
-            device=current_device
-        )
+        # Get class counts with device safety
+        try:
+            counts = self.class_counts.to(device)
+            top_classes = torch.topk(counts, self.top_k).indices
+            bottom_classes = torch.topk(-counts, self.bottom_k).indices
+            tracked_classes = torch.cat([top_classes, bottom_classes])
+        except Exception as e:
+            self._logger.error(f"Class ranking failed: {str(e)}")
+            return metrics
         
-        tracked_classes = torch.cat([top_classes, bottom_classes])
+        # Process samples
+        samples = []
+        for p, t in self.top_bottom_samples:
+            try:
+                samples.append((p.to(device, non_blocking=True), 
+                            t.to(device, non_blocking=True)))
+            except RuntimeError as e:
+                self._logger.warning(f"Skipping corrupted sample: {str(e)}")
+                continue
         
-        # Ensure samples are on correct device before computation
-        top_bottom_samples = [
-            (p.to(current_device), t.to(current_device))
-            for p, t in self.top_bottom_samples
-        ]
-        
-        top_bottom_confmat = self._compute_tracked_confusion(
-            top_bottom_samples,
-            tracked_classes
-        )
-        
-        if top_bottom_confmat is not None:
-            self.top_bottom_confmat = top_bottom_confmat.to(current_device)
+        # Compute confusion matrix
+        confmat = self._compute_tracked_confusion(samples, tracked_classes)
+        if confmat is not None:
+            self.top_bottom_confmat = confmat.to(device)
             num_top = len(top_classes)
             
-            # Track metrics for top classes
+            # Top classes metrics
             for i, cls in enumerate(top_classes):
-                cls_idx = i
-                tp = top_bottom_confmat[cls_idx, cls_idx]
-                fp = top_bottom_confmat[:, cls_idx].sum() - tp
-                fn = top_bottom_confmat[cls_idx, :].sum() - tp
-                
-                precision = tp / (tp + fp + 1e-8)
-                recall = tp / (tp + fn + 1e-8)
-                f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-                
-                metrics.update({
-                    f'val/top_{i}_acc': (top_bottom_confmat[cls_idx, cls_idx] / 
-                                        top_bottom_confmat[cls_idx, :].sum()).to(current_device),
-                    f'val/top_{i}_precision': precision.to(current_device),
-                    f'val/top_{i}_recall': recall.to(current_device),
-                    f'val/top_{i}_f1': f1.to(current_device)
-                })
+                try:
+                    cls_idx = i
+                    tp = confmat[cls_idx, cls_idx]
+                    fp = confmat[:, cls_idx].sum() - tp
+                    fn = confmat[cls_idx, :].sum() - tp
+                    
+                    precision = tp / (tp + fp + 1e-8)
+                    recall = tp / (tp + fn + 1e-8)
+                    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+                    
+                    metrics.update({
+                        f'val/top_{i}_acc': tp / (tp + fn + 1e-8),
+                        f'val/top_{i}_precision': precision,
+                        f'val/top_{i}_recall': recall,
+                        f'val/top_{i}_f1': f1
+                    })
+                except Exception as e:
+                    self._logger.warning(f"Failed top class {i} metrics: {str(e)}")
+                    continue
             
-            # Track metrics for bottom classes
+            # Bottom classes metrics
             for j, cls in enumerate(bottom_classes):
-                cls_idx = num_top + j
-                tp = top_bottom_confmat[cls_idx, cls_idx]
-                fp = top_bottom_confmat[:, cls_idx].sum() - tp
-                fn = top_bottom_confmat[cls_idx, :].sum() - tp
-                
-                precision = tp / (tp + fp + 1e-8)
-                recall = tp / (tp + fn + 1e-8)
-                f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-                
-                metrics.update({
-                    f'val/bottom_{j}_acc': (top_bottom_confmat[cls_idx, cls_idx] / 
-                                        top_bottom_confmat[cls_idx, :].sum()).to(current_device),
-                    f'val/bottom_{j}_precision': precision.to(current_device),
-                    f'val/bottom_{j}_recall': recall.to(current_device),
-                    f'val/bottom_{j}_f1': f1.to(current_device)
-                })
-        
-        # Log metrics and reset
-        self.log_dict(metrics, prog_bar=True)
-        self._reset_metrics()
-        self._reset_tracking()
+                try:
+                    cls_idx = num_top + j
+                    tp = confmat[cls_idx, cls_idx]
+                    fp = confmat[:, cls_idx].sum() - tp
+                    fn = confmat[cls_idx, :].sum() - tp
+                    
+                    metrics.update({
+                        f'val/bottom_{j}_acc': tp / (tp + fn + 1e-8),
+                        f'val/bottom_{j}_precision': tp / (tp + fp + 1e-8),
+                        f'val/bottom_{j}_recall': tp / (tp + fn + 1e-8),
+                        f'val/bottom_{j}_f1': 2*tp/(2*tp + fp + fn + 1e-8)
+                    })
+                except Exception as e:
+                    self._logger.warning(f"Failed bottom class {j} metrics: {str(e)}")
+                    continue
+                    
+        return metrics
 
     def _reset_tracking(self):
         """Reset tracking structures for next epoch"""
