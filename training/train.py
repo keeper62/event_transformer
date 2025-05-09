@@ -587,10 +587,18 @@ class TransformerLightning(pl.LightningModule):
         
         # Update important class metrics
         if len(self.important_classes) > 0:
-            self.important_classes = self.important_classes.to(targets)
-            self._logger.debug(f"Final devices - targets: {targets.device}, important_classes: {self.important_classes.device}")
-            important_mask = torch.isin(targets, self.important_classes)
-            self._logger.debug("Test 3")
+            # Ensure both tensors are on the same device
+            current_device = targets.device
+            important_classes = self.important_classes.to(current_device)
+            
+            # Create mask on the same device as targets
+            important_mask = torch.isin(
+                targets.cpu(),  # torch.isin requires both tensors on CPU
+                important_classes.cpu()
+            ).to(current_device)  # Move mask back to original device
+            
+            self._logger.debug(f"Device check - mask: {important_mask.device}, targets: {targets.device}")
+            
             if important_mask.any():
                 self.val_important_acc.update(preds[important_mask], targets[important_mask])
                 
