@@ -593,9 +593,9 @@ class TransformerLightning(pl.LightningModule):
             
             # Create mask on the same device as targets
             important_mask = torch.isin(
-                targets.cpu(),  # torch.isin requires both tensors on CPU
-                important_classes.cpu()
-            ).to(current_device)  # Move mask back to original device
+                targets,  # torch.isin requires both tensors on CPU
+                important_classes
+            ).cpu()  # Move mask back to original device
             
             self._logger.debug(f"Device check - mask: {important_mask.device}, targets: {targets.device}")
             
