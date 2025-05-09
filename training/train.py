@@ -582,6 +582,8 @@ class TransformerLightning(pl.LightningModule):
         
         self.validation_step_outputs.append(loss)
         
+        self._logger.debug("Test 2")
+        
         # Update important class metrics
         if len(self.important_classes) > 0:
             important_mask = torch.isin(targets, self.important_classes)
