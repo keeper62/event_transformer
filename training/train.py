@@ -560,7 +560,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Final device check before return
         self._validate_device_consistency(outputs, final_targets)
-        return outputs.to(device), final_targets.to(device)
+        return outputs, final_targets
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
