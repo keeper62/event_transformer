@@ -566,6 +566,7 @@ class TransformerLightning(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
+        batch.to(self.device)
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
