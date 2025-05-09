@@ -20,6 +20,8 @@ import os
 
 import logging
 
+logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
+
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
     logger = logging.getLogger(name or __name__)
@@ -312,14 +314,13 @@ class TransformerLightning(pl.LightningModule):
         self._logger.setLevel(logging.DEBUG)
         
         # File handler (only added by rank 0 to avoid duplicate logs)
-        if self._should_add_handlers():
-            file_handler = logging.FileHandler("training.log")
-            file_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            file_handler.setFormatter(formatter)
-            self._logger.addHandler(file_handler)
+        file_handler = logging.FileHandler("training.log")
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        file_handler.setFormatter(formatter)
+
             
         self._logger.info("Initializing transformer model")
         
@@ -500,7 +501,7 @@ class TransformerLightning(pl.LightningModule):
     def _validate_device_consistency(self, *tensors: torch.Tensor) -> None:
         """Debug helper to check tensor devices"""
         devices = {t.device for t in tensors if isinstance(t, torch.Tensor)}
-        self._logging.debug(f"Devices: {devices}")
+        self._logger.debug(f"Devices: {devices}")
         if len(devices) > 1:
             error_msg = f"Device mismatch detected. Found devices: {devices}\n"
             error_msg += "Tensor details:\n"
@@ -514,7 +515,7 @@ class TransformerLightning(pl.LightningModule):
         inputs, targets, sequences = batch
         
         # Debug device consistency
-        self._logging.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
+        self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
         
         device = inputs.device
         outputs = []
@@ -549,7 +550,7 @@ class TransformerLightning(pl.LightningModule):
         final_outputs = outputs.reshape(-1, self.num_classes)
         final_targets = targets.reshape(-1)
         
-        self._logging.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
+        self._logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
         
         final_targets = targets.reshape(-1)
         
