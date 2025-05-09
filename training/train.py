@@ -536,9 +536,6 @@ class TransformerLightning(pl.LightningModule):
     def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         inputs, targets, sequences = batch
         
-        # Debug device consistency
-        self._logger.debug(f"Input shapes - inputs: {inputs.shape}, targets: {targets.shape}, sequences: {sequences.shape}")
-        
         device = inputs.device
         outputs = []
 
@@ -569,11 +566,6 @@ class TransformerLightning(pl.LightningModule):
                     ], dim=1)
 
         outputs = torch.stack(outputs, dim=1).float()
-        final_outputs = outputs.reshape(-1, self.num_classes)
-        final_targets = targets.reshape(-1)
-        
-        self._logger.debug(f"Final shapes - outputs: {final_outputs.shape}, targets: {final_targets.shape}")
-        
         final_targets = targets.reshape(-1)
         
         # Final device check before return
@@ -600,8 +592,6 @@ class TransformerLightning(pl.LightningModule):
         
         self.validation_step_outputs.append(loss)
         
-        self._logger.debug("Test 2")
-        
         # Update important class metrics
         if len(self.important_classes) > 0:
             # 1. Ensure both tensors are on CPU for isin()
@@ -620,8 +610,6 @@ class TransformerLightning(pl.LightningModule):
                 self.val_important_acc.to('cpu')
                 self.val_important_acc.update(preds_cpu[important_mask_cpu], targets_cpu[important_mask_cpu])
                 self.val_important_acc.to(targets.device)  # Move metric back to original device
-        
-        self._logger.debug("Test 3")    
 
         self._track_class_performance(preds, targets)    
             
@@ -650,25 +638,40 @@ class TransformerLightning(pl.LightningModule):
                 logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
     
     def on_validation_epoch_end(self):
+        # Ensure all metrics are on the correct device
+        current_device = self.device
+        
+        # Move metrics to current device if needed
+        self.val_acc = self.val_acc.to(current_device)
+        if len(self.important_classes) > 0:
+            self.val_important_acc = self.val_important_acc.to(current_device)
+        
+        # Compute base metrics
         metrics = {
-            'val/loss': torch.stack([x for x in self.validation_step_outputs]).mean(),
+            'val/loss': torch.stack([x.to(current_device) for x in self.validation_step_outputs]).mean(),
             'val/acc': self.val_acc.compute(),
-            'val/approx_f1': self._compute_approximate_f1()
+            'val/approx_f1': self._compute_approximate_f1().to(current_device)
         }
         
         # Compute important class metrics
         if len(self.important_classes) > 0:
+            # Move important classes to correct device
+            important_classes = self.important_classes.to(current_device)
+            
+            # Compute important class accuracy
             metrics['val/important_acc'] = self.val_important_acc.compute()
             
-            # Compute confusion matrix for important classes
+            # Compute confusion matrix with device handling
             important_confmat = self._compute_tracked_confusion(
-                self.important_class_samples,
-                self.important_classes
+                [(p.to(current_device), t.to(current_device)) for p, t in self.important_class_samples],
+                important_classes
             )
+            
             if important_confmat is not None:
-                self.important_class_confmat = important_confmat
-                # Compute precision/recall/F1 for important classes
-                for i, cls in enumerate(self.important_classes):
+                self.important_class_confmat = important_confmat.to(current_device)
+                
+                # Compute per-class metrics
+                for i, cls in enumerate(important_classes):
                     cls_idx = i
                     tp = important_confmat[cls_idx, cls_idx]
                     fp = important_confmat[:, cls_idx].sum() - tp
@@ -679,26 +682,37 @@ class TransformerLightning(pl.LightningModule):
                     f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
                     
                     metrics.update({
-                        f'val/important_{cls.item()}_precision': precision,
-                        f'val/important_{cls.item()}_recall': recall,
-                        f'val/important_{cls.item()}_f1': f1
+                        f'val/important_{cls.item()}_precision': precision.to(current_device),
+                        f'val/important_{cls.item()}_recall': recall.to(current_device),
+                        f'val/important_{cls.item()}_f1': f1.to(current_device)
                     })
         
         # Compute top/bottom class metrics
-        current_counts = self.class_counts.cpu().numpy()
-        top_classes = torch.tensor(np.argpartition(-current_counts, self.top_k)[:self.top_k], 
-                    device=self.device)
-        bottom_classes = torch.tensor(np.argpartition(current_counts, self.bottom_k)[:self.bottom_k],
-                        device=self.device)
+        current_counts = self.class_counts.to(current_device)
+        top_classes = torch.tensor(
+            np.argpartition(-current_counts.cpu().numpy(), self.top_k)[:self.top_k],
+            device=current_device
+        )
+        bottom_classes = torch.tensor(
+            np.argpartition(current_counts.cpu().numpy(), self.bottom_k)[:self.bottom_k],
+            device=current_device
+        )
         
         tracked_classes = torch.cat([top_classes, bottom_classes])
+        
+        # Ensure samples are on correct device before computation
+        top_bottom_samples = [
+            (p.to(current_device), t.to(current_device))
+            for p, t in self.top_bottom_samples
+        ]
+        
         top_bottom_confmat = self._compute_tracked_confusion(
-            self.top_bottom_samples,
+            top_bottom_samples,
             tracked_classes
         )
         
         if top_bottom_confmat is not None:
-            self.top_bottom_confmat = top_bottom_confmat
+            self.top_bottom_confmat = top_bottom_confmat.to(current_device)
             num_top = len(top_classes)
             
             # Track metrics for top classes
@@ -713,10 +727,11 @@ class TransformerLightning(pl.LightningModule):
                 f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
                 
                 metrics.update({
-                    f'val/top_{i}_acc': top_bottom_confmat[cls_idx, cls_idx] / top_bottom_confmat[cls_idx, :].sum(),
-                    f'val/top_{i}_precision': precision,
-                    f'val/top_{i}_recall': recall,
-                    f'val/top_{i}_f1': f1
+                    f'val/top_{i}_acc': (top_bottom_confmat[cls_idx, cls_idx] / 
+                                        top_bottom_confmat[cls_idx, :].sum()).to(current_device),
+                    f'val/top_{i}_precision': precision.to(current_device),
+                    f'val/top_{i}_recall': recall.to(current_device),
+                    f'val/top_{i}_f1': f1.to(current_device)
                 })
             
             # Track metrics for bottom classes
@@ -731,12 +746,14 @@ class TransformerLightning(pl.LightningModule):
                 f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
                 
                 metrics.update({
-                    f'val/bottom_{j}_acc': top_bottom_confmat[cls_idx, cls_idx] / top_bottom_confmat[cls_idx, :].sum(),
-                    f'val/bottom_{j}_precision': precision,
-                    f'val/bottom_{j}_recall': recall,
-                    f'val/bottom_{j}_f1': f1
+                    f'val/bottom_{j}_acc': (top_bottom_confmat[cls_idx, cls_idx] / 
+                                        top_bottom_confmat[cls_idx, :].sum()).to(current_device),
+                    f'val/bottom_{j}_precision': precision.to(current_device),
+                    f'val/bottom_{j}_recall': recall.to(current_device),
+                    f'val/bottom_{j}_f1': f1.to(current_device)
                 })
         
+        # Log metrics and reset
         self.log_dict(metrics, prog_bar=True)
         self._reset_metrics()
         self._reset_tracking()
