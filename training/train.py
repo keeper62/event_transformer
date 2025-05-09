@@ -588,9 +588,9 @@ class TransformerLightning(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        logging.debug("Now calculating loss")
+        self._logger.debug("Now calculating loss")
         loss = self.loss_fn(logits, targets)
-        logging.debug("Loss calculated")
+        self._logger.debug("Loss calculated")
         
         return loss
     
