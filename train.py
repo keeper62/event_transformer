@@ -128,7 +128,8 @@ def train_with_config(
             fast_dev_run=test_mode,
             overfit_batches=config['training'].get('overfit_batches', 0),
             enable_progress_bar=int(os.getenv("LOCAL_RANK", 0)) == 0,
-            precision='16-mixed'
+            precision='16-mixed',
+            accumulate_grad_batches=4
         )
 
         logger.info(f"Starting training with config: {config_name}")
