@@ -20,7 +20,7 @@ import os
 
 import logging
 
-logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
+logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
