@@ -551,7 +551,7 @@ class TransformerLightning(pl.LightningModule):
         if hasattr(self, 'val_important'):
             self.val_important(preds, targets)
         
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True)
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def on_validation_epoch_end(self):
@@ -602,8 +602,8 @@ class TransformerLightning(pl.LightningModule):
         is_correct = (preds == targets).float()
         self.train_acc.update(is_correct, torch.ones_like(is_correct))
         
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/acc", self.train_acc, on_step=True, on_epoch=False, prog_bar=True)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/acc", self.train_acc, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
         
         return loss
     
