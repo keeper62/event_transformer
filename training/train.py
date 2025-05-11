@@ -31,7 +31,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.propagate = False  # Critical for PL compatibility
     
     if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only    
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
         
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
@@ -39,7 +39,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.DEBUG)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -154,7 +154,7 @@ class DataModule(pl.LightningDataModule):
         self._setup_complete = False
         
         self._logger = setup_logger(self.__class__.__name__)
-        self._logger.info(f"Initializing DataModule with config: {config}")
+        self._logger.debug(f"Initializing DataModule with config: {config}")
         
         # Log device info early
         self._log_device_info()
@@ -164,14 +164,14 @@ class DataModule(pl.LightningDataModule):
             self._logger.debug("Initializing LogTemplateMiner...")
             self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
             
+            self._logger.debug("Loading template miner state...")
+            self.template_miner.load_state()
+            
             self._logger.debug("Initializing LogTokenizer...")
             self.tokenizer = LogTokenizer(
                 config['tokenizer']['tokenizer_length'], 
                 tokenizer_path=config['tokenizer']['tokenizer_path']
             )
-            
-            self._logger.debug("Loading template miner state...")
-            self.template_miner.load_state()
             
             # Dynamic dataset class loading
             self._logger.debug(f"Loading dataset class: {config['dataset']['class']}")
@@ -234,7 +234,7 @@ class DataModule(pl.LightningDataModule):
                 )
                 self.val_dataset = self.test_dataset
             else:
-                val_size = min(int(0.2 * len(self.full_dataset)), 2500)
+                val_size = min(int(0.2 * len(self.full_dataset)), 4096)
                 train_size = len(self.full_dataset) - val_size
                 self._logger.info(f"Train mode: splitting into {train_size} train, {val_size} val samples")
                 
@@ -351,7 +351,13 @@ class DataModule(pl.LightningDataModule):
         
         weights = weights * (vocab_size / weights.sum())
         
-        self._logger.info(f"Class weights computed - min: {weights.min():.2f}, max: {weights.max():.2f}")
+        # Log statistics
+        self._logger.info(
+            f"Class weights: min={weights.min():.2f}, "
+            f"median={weights.median():.2f}, "
+            f"max={weights.max():.2f}"
+        )
+    
         return weights
 
     def train_dataloader(self) -> DataLoader:

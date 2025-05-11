@@ -10,7 +10,7 @@ base_config:
         num_heads: 8
         num_layers: 6
         ffn_dim: 2048
-        num_windows: 30          # Sliding window size for multi-head attention
+        num_windows: 64          # Sliding window size for multi-head attention
         max_len: 512
         context_length: 256      # The # steps in the past as input
         prediction_steps: 64      # The # steps in the future to predict
@@ -21,8 +21,8 @@ base_config:
 
     # Training Parameters
     training:
-        num_epochs: 10
-        batch_size: 256
+        num_epochs: 32
+        batch_size: 128
         learning_rate: 0.001
         weight_decay: 0.01       # L2 regularization
         gradient_clip_val: 1.0   # Gradient clipping value

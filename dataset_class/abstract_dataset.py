@@ -14,7 +14,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.propagate = False  # Critical for PL compatibility
     
     if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
         
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
