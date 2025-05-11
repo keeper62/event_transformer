@@ -324,40 +324,75 @@ class DataModule(pl.LightningDataModule):
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
-                 important_classes: torch.Tensor | None = None):
+                important_classes: torch.Tensor | None = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
         
+        # Setup logger
+        self._logger = setup_logger(self.__class__.__name__)
+        self._logger.info("Initializing TransformerLightning model")
+        
         # Model components
+        self._logger.debug(f"Creating Transformer with config: {config['model']}")
         self.model = Transformer(config)
         self.num_classes = config['model']['vocab_size']
+        self._logger.info(f"Model initialized with num_classes: {self.num_classes}")
         
-        self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long)
+        # Important classes setup
+        if important_classes is not None:
+            self.important_classes = important_classes.long()
+            self._logger.debug(f"Important classes received: {self.important_classes.shape} "
+                            f"(min: {self.important_classes.min()}, max: {self.important_classes.max()})")
+        else:
+            self.important_classes = torch.tensor([], dtype=torch.long)
+            self._logger.debug("No important classes specified")
+        
         self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
+        self._logger.debug(f"Using importance boost factor: {self.importance_boost_factor}")
         
-        # Initialize all metrics
+        # Initialize metrics
+        self._logger.debug("Initializing metrics...")
         self._init_metrics()
         
-        # Class weights and loss
+        # Class weights validation
         self.class_weights = class_weights
+        self._logger.debug(f"Class weights shape: {self.class_weights.shape} "
+                        f"(device: {self.class_weights.device})")
         
-            # Verify class weights match num_classes
+        # Verify class weights match num_classes
         if len(self.class_weights) != self.num_classes:
-            raise ValueError(f"class_weights length ({len(self.class_weights)}) "
+            error_msg = (f"class_weights length ({len(self.class_weights)}) "
                         f"doesn't match num_classes ({self.num_classes})")
+            self._logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # Verify important_classes are valid
         if len(self.important_classes) > 0:
             invalid = self.important_classes[(self.important_classes < 0) | 
                                             (self.important_classes >= self.num_classes)]
             if len(invalid) > 0:
-                raise ValueError(f"Invalid important_classes indices: {invalid.cpu().numpy()}")
-            
+                error_msg = f"Invalid important_classes indices: {invalid.cpu().numpy()}"
+                self._logger.error(error_msg)
+                raise ValueError(error_msg)
+            self._logger.debug(f"Validated important classes (count: {len(self.important_classes)})")
+        
+        # Loss function initialization
+        self._logger.debug("Initializing FocalLoss with: "
+                        f"gamma={config['training'].get('focal_gamma', 2.0)}, "
+                        f"reduction='mean'")
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
             reduction='mean'
         )
+        self._logger.info("FocalLoss initialized successfully")
+        
+        # Final initialization check
+        self._logger.info("TransformerLightning initialization complete")
+        if torch.cuda.is_available():
+            self._logger.info(f"Model will use GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            self._logger.info("Model will use CPU")
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(inputs, sequences) 
