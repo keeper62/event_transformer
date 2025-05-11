@@ -96,7 +96,10 @@ def train_with_config(
         
         # Get vocabulary sizes
         config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
+        logger.debug(f"Vocab size template miner: {config['model']['vocab_size']}")
+        
         config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
+        logger.debug(f"Vocab size tokenizer: {config['tokenizer']['vocab_size']} samples")
         
         # Get class distribution (for imbalance handling)
         class_weights = data_module.get_class_weights()
