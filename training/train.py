@@ -581,7 +581,7 @@ class TransformerLightning(pl.LightningModule):
                 device=self.device
             )
         
-        self.log_dict(metrics, prog_bar=False)
+        self.log_dict(metrics, prog_bar=False, sync_dist=True)
         
         # Reset all metrics
         self.val_acc.reset()
