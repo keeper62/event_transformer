@@ -13,6 +13,22 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
+import socket
+import random
+
+def find_free_port() -> int:
+    """Find a random available port."""
+    while True:
+        port = random.randint(29500, 30000)  # Common range for distributed training
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('', port))
+                return port
+            except socket.error as e:
+                if e.errno == 98:  # EADDRINUSE
+                    continue
+                raise
+
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
     logger = logging.getLogger(name or __name__)
@@ -90,6 +106,11 @@ def train_with_config(
 ) -> None:
     """Train the model with the given configuration."""
     try:
+        if num_accelerators > 1 or num_nodes > 1:
+            free_port = find_free_port()
+            os.environ['MASTER_PORT'] = str(free_port)
+            logger.info(f"Using distributed training port: {free_port}")
+        
         # Initialize data module
         logger.debug("Initializing DataModule")
         data_module = DataModule(config, test_mode=test_mode)
