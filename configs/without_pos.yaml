@@ -75,7 +75,7 @@ base_config:
     # Dataset Settings
     dataset:
         name: "xc40"
-        path: "data/xc40/"
+        path: "data/xc40.log"
         class: "xc40_dataset"     # Dataset class name
         drain_path: "drain3_state_xc40.bin"
         vocab_path: "tokenizer_state_xc40.txt"
@@ -96,3 +96,8 @@ base_config:
     precision:
         mixed_precision: true     # Enable AMP (Automatic Mixed Precision)
         amp_level: "O1"           # Optimization level (O1, O2, O3)
+
+    tokenizer:
+        tokenizer_path: "tokenizer_state_xc40.txt"
+        tokenizer_length: 64  # Maximum sequence length for tokenization
+        vocab_size:
