@@ -49,25 +49,41 @@ class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
         super().__init__()
         self.metric = metric
-        self.important_classes = important_classes
+        self.important_classes = important_classes.to('cpu')  # Store on CPU
         self.prefix = prefix
         self._seen_samples = 0
-        self._has_updates = False  # New flag to track updates
+        self._has_updates = False
 
     def update(self, preds, target):
-        mask = torch.isin(target, self.important_classes)
+        # Move important_classes to target device
+        important_classes = self.important_classes.to(target.device)
+        
+        # Create mask safely
+        mask = torch.zeros_like(target, dtype=torch.bool)
+        for cls in important_classes:
+            mask = mask | (target == cls)
+        
         if mask.any():
+            # Ensure preds and target are on same device
+            preds = preds.to(target.device)
             self.metric.update(preds[mask], target[mask])
             self._seen_samples += mask.sum().item()
-            self._has_updates = True  # Mark that we have updates
+            self._has_updates = True
 
     def compute(self):
         if not self._has_updates:
-            # Return properly formatted metrics with NaN values
-            if isinstance(self.metric, torchmetrics.F1Score):
-                return {f"{self.prefix}f1": torch.tensor(float('nan'), device=self.device)}
-            return {}
-        return self.metric.compute()
+            # Create NaN tensor on correct device
+            if hasattr(self, 'device'):  # Use metric's device if available
+                device = self.device
+            else:
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                
+            return {f"{self.prefix}f1": torch.tensor(float('nan'), device=device)}
+        
+        result = self.metric.compute()
+        if isinstance(result, dict):
+            return {f"{self.prefix}{k}": v for k, v in result.items()}
+        return {f"{self.prefix}score": result}
 
     def reset(self):
         self.metric.reset()
@@ -83,40 +99,46 @@ class FocalLoss(nn.Module):
         self._logger = setup_logger(self.__class__.__name__)
 
     def forward(self, inputs, targets):
-        """
-        More numerically stable implementation
-        """
+        # Ensure tensors are on same device
+        targets = targets.to(inputs.device)
+        
         # Flatten if needed
         if inputs.dim() == 3:
             inputs = inputs.reshape(-1, inputs.size(-1))
             targets = targets.reshape(-1)
 
-        # Debug shapes
-        self._logger.debug(f"FocalLoss shapes - inputs: {inputs.shape}, targets: {targets.shape}")
+        # Debug shapes and device
+        self._logger.debug(f"FocalLoss - inputs: {inputs.shape} ({inputs.device}), "
+                         f"targets: {targets.shape} ({targets.device})")
 
-        # Compute log softmax directly (more stable than softmax + log)
+        # Validate targets
+        if (targets < 0).any():
+            self._logger.warning(f"Negative targets detected: {targets[targets < 0]}")
+            targets = targets.clamp(min=0)
+            
+        # Compute log softmax
         log_probs = F.log_softmax(inputs, dim=1)
         
-        # Get the log probability of the true class
-        log_pt = log_probs.gather(1, targets.unsqueeze(1))
-        log_pt = log_pt.squeeze(1)
-        
-        # Compute pt (probability of true class)
-        pt = log_pt.exp()  # equivalent to softmax then gather
+        # Safe gather with bounds checking
+        if self.alpha is not None:
+            alpha = self.alpha.to(inputs.device)
+            max_idx = alpha.size(0) - 1
+            targets = targets.clamp(0, max_idx)
+            
+        # Get log probability of true class
+        log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        pt = log_pt.exp()
         
         # Compute focal term
         focal_term = (1 - pt) ** self.gamma
         
         # Apply class weights if provided
         if self.alpha is not None:
-            alpha = self.alpha.to(inputs.device)
             alpha_t = alpha.gather(0, targets)
             focal_term = alpha_t * focal_term
         
         # Final loss
         loss = -focal_term * log_pt
-
-        self._logger.debug(f"Loss stats - min: {loss.min().item():.4f}, max: {loss.max().item():.4f}, mean: {loss.mean().item():.4f}")
 
         if self.reduction == 'mean':
             return loss.mean()
