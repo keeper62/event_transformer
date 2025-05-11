@@ -294,35 +294,45 @@ class DataModule(pl.LightningDataModule):
             raise
 
     def get_class_weights(self, strategy: str = "inverse", max_samples: int = 1000) -> torch.Tensor:
-        """Enhanced class weight calculation with logging"""
-        self._logger.info(f"Computing class weights using {strategy} strategy")
+        self._logger.info("Computing class weights...")
         
         if not self._setup_complete:
-            self._logger.debug("Running setup for weight calculation")
             self.setup()
 
         vocab_size = self.config['model']['vocab_size']
         counts = torch.zeros(vocab_size, dtype=torch.long)
         
-        # Sample processing
+        # Sample processing with enhanced debugging
         n_samples = min(len(self.train_dataset), max_samples)
         indices = torch.randperm(len(self.train_dataset))[:n_samples]
-        self._logger.debug(f"Processing {n_samples} samples for class weights")
+        
+        self._logger.debug(f"Processing {n_samples} samples")
+        self._logger.debug(f"Vocab size: {vocab_size}")
         
         try:
-            # Batch processing attempt
-            all_targets = torch.cat([self.train_dataset[idx][1].flatten() for idx in indices])
-            unique, counts_batch = torch.unique(all_targets, return_counts=True)
-            counts[unique] += counts_batch
-            self._logger.debug("Processed targets in batch mode")
-        except (MemoryError, RuntimeError) as e:
-            self._logger.warning(f"Batch processing failed, falling back to iterative: {str(e)}")
-            # Iterative processing
-            for idx in indices:
+            # Process samples with validation
+            for i, idx in enumerate(indices):
                 _, targets, _ = self.train_dataset[idx]
+                
+                # Validate targets
+                if (targets < 0).any() or (targets >= vocab_size).any():
+                    invalid = targets[(targets < 0) | (targets >= vocab_size)]
+                    self._logger.error(f"Invalid targets in sample {i}: {invalid.cpu().numpy()}")
+                    self._logger.error(f"Target range: {targets.min().item()} to {targets.max().item()}")
+                    self._logger.error(f"Vocab size: {vocab_size}")
+                    raise ValueError("Invalid target indices detected")
+                    
                 unique, counts_batch = torch.unique(targets.flatten(), return_counts=True)
                 counts[unique] += counts_batch
-            self._logger.debug("Processed targets iteratively")
+                
+                if i % 100 == 0:  # Progress logging
+                    self._logger.debug(f"Processed {i}/{n_samples} samples")
+                    
+        except Exception as e:
+            self._logger.error(f"Failed processing sample {i}: {str(e)}")
+            self._logger.error(f"Sample shapes - targets: {targets.shape}")
+            self._logger.error(f"Sample values - targets: {targets.cpu().numpy()}")
+            raise
         
         # Log class distribution
         self._logger.debug(f"Class distribution - min: {counts.min()}, max: {counts.max()}, mean: {counts.float().mean()}")
