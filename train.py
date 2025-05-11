@@ -30,7 +30,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
