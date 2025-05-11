@@ -39,7 +39,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -212,39 +212,6 @@ class DataModule(pl.LightningDataModule):
             self._logger.error(f"Dataset validation failed: {str(e)}")
             raise
 
-    def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
-        def collate_fn(batch):
-            # Add batch shape debugging
-            inputs, targets, sequences = zip(*batch)
-            
-            self._logger.debug(f"Raw batch shapes - "
-                       f"inputs: {[x.shape for x in inputs]}, "
-                       f"targets: {[x.shape for x in targets]}, "
-                       f"sequences: {[x.shape for x in sequences]}")
-            
-            inputs = torch.stack(inputs)
-            targets = torch.stack(targets)
-            sequences = torch.stack(sequences)
-            
-            self._logger.debug(f"Stacked batch shapes - "
-                       f"inputs: {inputs.shape}, "
-                       f"targets: {targets.shape}, "
-                       f"sequences: {sequences.shape}")
-            
-            return inputs, targets, sequences
-
-        return DataLoader(
-            dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=shuffle,
-            num_workers=self.config['dataset'].get('num_workers', 1),
-            pin_memory=self.config['dataset'].get('pin_memory', True),
-            persistent_workers=self.config['dataset'].get('persistent_workers', True),
-            prefetch_factor=2,
-            collate_fn=collate_fn,  # Use our custom collate with logging
-            drop_last=shuffle
-        )
-
     def get_class_weights(self, strategy: str = "inverse", max_samples: int = 1000) -> torch.Tensor:
         """
         Compute class weights to handle imbalance. Supports large datasets via sampling.
@@ -351,6 +318,19 @@ class TransformerLightning(pl.LightningModule):
         
         # Class weights and loss
         self.class_weights = class_weights
+        
+            # Verify class weights match num_classes
+        if len(self.class_weights) != self.num_classes:
+            raise ValueError(f"class_weights length ({len(self.class_weights)}) "
+                        f"doesn't match num_classes ({self.num_classes})")
+        
+        # Verify important_classes are valid
+        if len(self.important_classes) > 0:
+            invalid = self.important_classes[(self.important_classes < 0) | 
+                                            (self.important_classes >= self.num_classes)]
+            if len(invalid) > 0:
+                raise ValueError(f"Invalid important_classes indices: {invalid.cpu().numpy()}")
+            
         self.loss_fn = FocalLoss(
             alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
