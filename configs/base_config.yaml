@@ -11,7 +11,7 @@ base_config:
         num_layers: 6
         ffn_dim: 256
         num_windows: 32          # Sliding window size for multi-head attention
-        max_len: 128
+        max_len: 256
         context_length: 256      # The # steps in the past as input
         prediction_steps: 32      # The # steps in the future to predict
         num_groups: 6
