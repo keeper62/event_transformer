@@ -51,20 +51,28 @@ class ImportantClassWrapper(torchmetrics.Metric):
         self.metric = metric
         self.important_classes = important_classes
         self.prefix = prefix
-        
+        self._seen_samples = 0
+        self._has_updates = False  # New flag to track updates
+
     def update(self, preds, target):
-        # Create mask for important classes
         mask = torch.isin(target, self.important_classes)
-        
-        # Only update metric for important class samples
         if mask.any():
             self.metric.update(preds[mask], target[mask])
-    
+            self._seen_samples += mask.sum().item()
+            self._has_updates = True  # Mark that we have updates
+
     def compute(self):
-        return {f"{self.prefix}{k}": v for k, v in self.metric.compute().items()}
-    
+        if not self._has_updates:
+            # Return properly formatted metrics with NaN values
+            if isinstance(self.metric, torchmetrics.F1Score):
+                return {f"{self.prefix}f1": torch.tensor(float('nan'), device=self.device)}
+            return {}
+        return self.metric.compute()
+
     def reset(self):
         self.metric.reset()
+        self._seen_samples = 0
+        self._has_updates = False
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -72,44 +80,44 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.alpha = alpha
         self.reduction = reduction
-        
         self._logger = setup_logger(self.__class__.__name__)
 
     def forward(self, inputs, targets):
         """
-        Args:
-            inputs: (N, L, C) or (N, C) where C = num_classes
-            targets: (N, L) or (N,) containing class indices
+        More numerically stable implementation
         """
-        # Flatten sequence dimensions if needed
+        # Flatten if needed
         if inputs.dim() == 3:
-            inputs = inputs.reshape(-1, inputs.size(-1))  # [N*L, C]
-            targets = targets.reshape(-1)  # [N*L]
-        
+            inputs = inputs.reshape(-1, inputs.size(-1))
+            targets = targets.reshape(-1)
+
         # Debug shapes
         self._logger.debug(f"FocalLoss shapes - inputs: {inputs.shape}, targets: {targets.shape}")
+
+        # Compute log softmax directly (more stable than softmax + log)
+        log_probs = F.log_softmax(inputs, dim=1)
         
-        # Convert logits to probabilities
-        probs = F.softmax(inputs, dim=1)
+        # Get the log probability of the true class
+        log_pt = log_probs.gather(1, targets.unsqueeze(1))
+        log_pt = log_pt.squeeze(1)
         
-        # Create one-hot encoding
-        targets_one_hot = F.one_hot(targets, num_classes=inputs.size(-1)).float()
+        # Compute pt (probability of true class)
+        pt = log_pt.exp()  # equivalent to softmax then gather
         
-        # Compute loss
-        log_probs = torch.log(probs.clamp(min=1e-8))
-        ce_loss = -targets_one_hot * log_probs
-        p_t = torch.sum(probs * targets_one_hot, dim=1)
-        focal_weight = (1 - p_t) ** self.gamma
+        # Compute focal term
+        focal_term = (1 - pt) ** self.gamma
         
+        # Apply class weights if provided
         if self.alpha is not None:
             alpha = self.alpha.to(inputs.device)
             alpha_t = alpha.gather(0, targets)
-            ce_loss = alpha_t.unsqueeze(1) * ce_loss
+            focal_term = alpha_t * focal_term
         
-        loss = focal_weight.unsqueeze(1) * ce_loss
-        
-        self._logger.debug("Loss calculated!")
-        
+        # Final loss
+        loss = -focal_term * log_pt
+
+        self._logger.debug(f"Loss stats - min: {loss.min().item():.4f}, max: {loss.max().item():.4f}, mean: {loss.mean().item():.4f}")
+
         if self.reduction == 'mean':
             return loss.mean()
         elif self.reduction == 'sum':
@@ -333,11 +341,6 @@ class TransformerLightning(pl.LightningModule):
         
         # Model components
         self.model = Transformer(config)
-        self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(
-            tokenizer_length=config['tokenizer']['tokenizer_length'],
-            tokenizer_path=config['tokenizer']['tokenizer_path']
-        )
         self.num_classes = config['model']['vocab_size']
         
         self.important_classes = important_classes.long() if important_classes is not None else torch.tensor([], dtype=torch.long)
@@ -359,35 +362,32 @@ class TransformerLightning(pl.LightningModule):
 
     def _init_metrics(self):
         """Initialize all TorchMetrics for evaluation"""
-        common_args = {
-            'task': 'multiclass',
-            'num_classes': self.num_classes,
-            "sync_on_compute": False,
-            'average': 'weighted'
+    # Common settings
+        metric_args = {
+            'task': 'binary'
         }
+        self.train_acc = torchmetrics.Accuracy(**metric_args)
         
         # Validation metrics
-        self.val_acc = torchmetrics.Accuracy(**common_args)
-        self.val_top5 = torchmetrics.Accuracy(**common_args, top_k=5)
-        self.val_precision = torchmetrics.Precision(**common_args)
-        self.val_recall = torchmetrics.Recall(**common_args)
-        self.val_f1 = torchmetrics.F1Score(**common_args)
+        self.val_acc = torchmetrics.Accuracy(**metric_args)
+        self.val_precision = torchmetrics.Precision(**metric_args)
+        self.val_recall = torchmetrics.Recall(**metric_args)
+        self.val_f1 = torchmetrics.F1Score(**metric_args)
         
-        # Additional recommended metrics for event prediction
-        conf_args = {
-            'task': 'multiclass',
-            'num_classes': self.num_classes,
-            "compute_on_cpu": True
-        }
-        self.val_confusion = torchmetrics.ConfusionMatrix(**conf_args, normalize='true')
-        self.val_coverage = torchmetrics.ClasswiseWrapper(
-            torchmetrics.StatScores(**common_args),
-            prefix='val/class_'
+        self.val_top5 = torchmetrics.Accuracy(
+            task='multiclass',
+            num_classes=self.num_classes,
+            top_k=5
         )
         
+        # Important classes (keep original multi-class behavior)
         if self.important_classes is not None:
             self.val_important = ImportantClassWrapper(
-                torchmetrics.F1Score(**common_args),
+                torchmetrics.F1Score(
+                    task='multiclass',
+                    num_classes=self.num_classes,
+                    average='weighted'
+                ),
                 important_classes=self.important_classes,
                 prefix='val/important_'
             )
@@ -402,60 +402,38 @@ class TransformerLightning(pl.LightningModule):
             adjusted_weights[valid_classes] *= self.importance_boost_factor
         return adjusted_weights
 
-    def _process_batch(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _process_batch(self, batch):
         inputs, targets, sequences = batch
+        logits = self.model(inputs, sequences)
         
-        device = inputs.device
-        outputs = []
-
-        with torch.amp.autocast(device_type=device.type, enabled=self.hparams.config['training'].get('mixed_precision', True)):
-            current_inputs = inputs.clone()
-            current_sequences = sequences.clone()
-
-            for step in range(self.model.n_steps):
-                logits = self(current_inputs, current_sequences)
-                logits_last = logits[:, -1, :]
-                outputs.append(logits_last)
-
-                with torch.no_grad():
-                    probs = torch.softmax(logits_last, dim=-1)
-                    preds = probs.argmax(dim=-1)
-                    
-                    current_inputs = torch.cat([current_inputs[:, 1:], preds.unsqueeze(1)], dim=1)
-                    
-                    pred_templates = [self.template_miner.decode_event_id_sequence(p.item()) for p in preds]
-                    tokenized = self.tokenizer.batch_transform(pred_templates)
-                    
-                    # Debug the new sequence tensor
-                    new_sequence = torch.tensor(tokenized, device=device).unsqueeze(1)
-                    
-                    current_sequences = torch.cat([
-                        current_sequences[:, 1:], 
-                        new_sequence
-                    ], dim=1)
-
-        outputs = torch.stack(outputs, dim=1).float()
-        final_targets = targets.reshape(-1)
+        logits = logits.half()  
         
-        return outputs, final_targets
+        # Reshape logits from [N, B, C] to [N * B, C]
+        logits = logits.reshape(-1, logits.shape[-1])
+
+        # Reshape targets from [N, B] to [N * B]
+        targets = targets.reshape(-1)
+        
+        return logits, targets    # Now targets already shifted
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Reshape logits to [batch*seq_len, num_classes]
-        logits = logits.reshape(-1, logits.shape[-1])
+        # Get predictions
         preds = logits.argmax(dim=-1)
+        is_correct = (preds == targets)  # Binary correctness [N*B]
         
-        # Update all metrics
-        self.val_acc.update(preds, targets)
-        self.val_top5.update(logits, targets)  # Logits needed for top-k
-        self.val_precision.update(preds, targets)
-        self.val_recall.update(preds, targets)
-        self.val_f1.update(preds, targets)
-        self.val_confusion.update(preds, targets)
-        self.val_coverage.update(preds, targets)
+        # Update binary metrics
+        self.val_acc.update(is_correct, torch.ones_like(is_correct))  # Targets are all "1" (correct)
+        self.val_precision.update(is_correct, torch.ones_like(is_correct))
+        self.val_recall.update(is_correct, torch.ones_like(is_correct))
+        self.val_f1.update(is_correct, torch.ones_like(is_correct))
         
+        # Update top-5 (still multiclass)
+        self.val_top5.update(logits, targets)
+        
+        # Update important class metrics (original multi-class)
         if hasattr(self, 'val_important'):
             self.val_important(preds, targets)
         
@@ -470,21 +448,26 @@ class TransformerLightning(pl.LightningModule):
             'val/precision': self.val_precision.compute(),
             'val/recall': self.val_recall.compute(),
             'val/f1': self.val_f1.compute(),
-            'val/coverage': self.val_coverage.compute()['val/class_recall'],  # Using recall as coverage proxy
         }
-        
-        # Log confusion matrix diagonals (per-class accuracy)
-        confmat = self.val_confusion.compute()
-        metrics.update({
-            f'val/confusion_{i}': confmat[i,i] for i in range(min(10, self.num_classes))  # First 10 classes
-        })
-        
-        self.log_dict(metrics, prog_bar=False)
-        
-        # Log important class metrics separately
+           
+        # Handle important classes
         if hasattr(self, 'val_important'):
             important_metrics = self.val_important.compute()
-            self.log_dict(important_metrics, prog_bar=True)
+            if isinstance(important_metrics, dict):
+                metrics.update({
+                    f"val/important_{k}": v 
+                    for k, v in important_metrics.items()
+                })
+            else:
+                metrics['val/important_f1'] = important_metrics
+            
+            # Convert sample count to float explicitly
+            metrics['val/important_samples'] = torch.tensor(
+                float(self.val_important._seen_samples),  # Explicit float conversion
+                device=self.device
+            )
+        
+        self.log_dict(metrics, prog_bar=False)
         
         # Reset all metrics
         self.val_acc.reset()
@@ -492,8 +475,7 @@ class TransformerLightning(pl.LightningModule):
         self.val_precision.reset()
         self.val_recall.reset()
         self.val_f1.reset()
-        self.val_confusion.reset()
-        self.val_coverage.reset()
+        
         if hasattr(self, 'val_important'):
             self.val_important.reset()
 
@@ -501,7 +483,14 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
+        # Compute training accuracy (binary)
+        preds = logits.argmax(dim=-1)
+        is_correct = (preds == targets).float()
+        self.train_acc.update(is_correct, torch.ones_like(is_correct))
+        
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/acc", self.train_acc, on_step=True, on_epoch=False, prog_bar=True)
+        
         return loss
     
     def on_train_batch_start(self, batch, batch_idx):
@@ -515,7 +504,6 @@ class TransformerLightning(pl.LightningModule):
                 process = psutil.Process()
                 logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
                 logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
-
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']

@@ -30,4 +30,4 @@ class Dataset(AbstractBGLDataset):
         ]
         
         # Return as list of messages per event_id, maintaining original order
-        return list(sorted_grouped_list)[:5]
+        return list(sorted_grouped_list)

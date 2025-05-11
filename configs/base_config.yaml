@@ -10,9 +10,9 @@ base_config:
         num_heads: 8
         num_layers: 6
         ffn_dim: 256
-        num_windows: 30          # Sliding window size for multi-head attention
+        num_windows: 32          # Sliding window size for multi-head attention
         max_len: 128
-        context_length: 128      # The # steps in the past as input
+        context_length: 256      # The # steps in the past as input
         prediction_steps: 32      # The # steps in the future to predict
         num_groups: 6
         dropout: 0.1
@@ -79,7 +79,7 @@ base_config:
         name: "xc40"
         path: "data/xc40.log"
         class: "xc40_dataset"     # Dataset class name
-        drain_path: "drain3_state_xc40.bin"
+        drain_path: "drain3_state_xc40_old.bin"
         num_workers: 2            # DataLoader workers
         pin_memory: true          # Enable for GPU training
         persistent_workers: true  # Maintain workers between epochs

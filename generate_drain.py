@@ -1,11 +1,11 @@
-from models.token import LogTokenizer
+from models.token import LogTemplateMiner
 
 if __name__ == "__main__":
-    path = "data/openstack.log"
+    path = "data/xc40.log"
     
-    tokenizer = LogTokenizer("drain3_state_openstack.bin")
+    tokenizer = LogTemplateMiner("drain3_state_xc40_new.bin")
     
-    with open(path, "r") as f:
+    with open(path, 'r', errors='replace') as f:
         for line in f:
             log = line
             tokenizer.add_log_message(log)

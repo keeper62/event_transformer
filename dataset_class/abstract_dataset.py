@@ -116,17 +116,16 @@ class AbstractBGLDataset(Dataset, ABC):
 
         # Slice windows with bounds checking
         input_end = start_idx + self.context_length
-        output_end = input_end + self.prediction_steps
         
-        if output_end > len(tokens):
+        if input_end + 1 > len(tokens):
             raise ValueError(
                 f"Window out of bounds: start_idx={start_idx}, "
-                f"input_end={input_end}, output_end={output_end}, "
+                f"input_end={input_end}, output_end={input_end + 1}, "
                 f"token_length={len(tokens)}"
             )
         
         input_window = tokens[start_idx:input_end]
-        output_window = tokens[input_end:output_end]
+        output_window = tokens[start_idx + 1:input_end + 1]
         input_sequences = sequences[start_idx:input_end]
         
         self.logger.debug(f"""Data device types - Input window: {input_window.device}, Output window: {output_window.device}, Input sequence: 

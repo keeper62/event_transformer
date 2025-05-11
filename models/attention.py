@@ -25,12 +25,6 @@ class BaseAttention(nn.Module):
         self.out_proj = nn.Linear(self.dim, self.dim, bias=atten_cfg.get('out_bias', True))
         self.dropout = nn.Dropout(model_cfg['dropout'])
         
-        # Mixed precision support
-        self._autocast_kwargs = {
-            'device_type': 'cuda' if torch.cuda.is_available() else 'cpu',
-            'enabled': config['training'].get('mixed_precision', True)
-        }
-        
         # Initialize parameters
         self._init_parameters()
 
@@ -44,68 +38,60 @@ class BaseAttention(nn.Module):
             nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        """Forward pass with optional templates and masking.
+        """Forward pass with combined causal + windowed masking."""
+        B, T, _ = x.shape
+
+        # Project queries, keys, values
+        qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)  # [B, H, T, D]
         
-        Args:
-            x: Input tensor of shape (B, T, D)
-            templates: Template tensor of shape (B, T, tokenizer_length)
-            mask: Whether to apply attention masking
-        """
-        with torch.amp.autocast(**self._autocast_kwargs):
-            B, T, _ = x.shape
+        # Compute attention scores
+        attn_scores = (q @ k.transpose(-2, -1)) * self.scale
+        
+        # Apply combined causal + windowed mask
+        if mask:
+            attn_scores = self._apply_combined_mask(attn_scores)
+        
+        # Compute attention weights
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        out = attn_weights @ v
+        out = out.transpose(1, 2).reshape(B, T, -1)
+        
+        return self.out_proj(out)
 
-            # Project queries, keys, values
-            qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.unbind(0)  # [B, H, T, D]
-            
-            # Compute attention scores
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            
-            # Apply attention mask if requested
-            if mask:
-                attn_scores = self._apply_attention_mask(attn_scores)
-            
-            # Compute attention weights
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-            
-            # Apply attention to values
-            out = torch.matmul(attn_weights, v)
-            out = out.transpose(1, 2).reshape(B, T, -1)
-            
-            return self.out_proj(out)
-
-    def _apply_attention_mask(self, attn_scores: torch.Tensor) -> torch.Tensor:
-        """Apply windowed attention mask to scores."""
+    def _apply_combined_mask(self, attn_scores: torch.Tensor) -> torch.Tensor:
+        """Apply combined causal + windowed attention mask."""
         B, H, T, _ = attn_scores.shape
         device = attn_scores.device
         
-        # Create band diagonal mask
-        mask = torch.ones(T, T, device=device) * float('-inf')
+        # Create base causal mask (upper triangular)
+        mask = torch.ones(T, T, device=device, dtype=torch.bool).triu(diagonal=1)
+        
+        # Apply window constraints
         for i in range(T):
             start = max(0, i - self.window_size)
             end = min(T, i + self.window_size + 1)
-            mask[i, start:end] = 0
+            mask[i, start:end] = False  # Allow attention within window
         
-        return attn_scores + mask.view(1, 1, T, T)
+        # Apply additive masking
+        return attn_scores.masked_fill(mask, float('-inf'))
 
     def get_attention_weights(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        """Return attention weights for visualization."""
+        """Return attention weights with same masking as forward pass."""
         with torch.no_grad():
             B, T, _ = x.shape
             qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, _ = qkv.unbind(0)
             
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            
-            if self.position_embedding is not None:
-                attn_scores += self.position_embedding(T)
+            attn_scores = (q @ k.transpose(-2, -1)) * self.scale
             
             if mask:
-                attn_scores = self._apply_attention_mask(attn_scores)
+                attn_scores = self._apply_combined_mask(attn_scores)
             
             return F.softmax(attn_scores, dim=-1)
-
 
 class MultiHeadAttention(BaseAttention):
     """Standard multi-head attention with optional memory-efficient implementation."""
@@ -116,22 +102,21 @@ class MultiHeadAttention(BaseAttention):
 
     def _memory_efficient_forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
         """Memory-efficient implementation using chunking."""
-        with torch.amp.autocast(**self._autocast_kwargs):
-            B, T, _ = x.shape
-            chunk_size = self.config['attention'].get('chunk_size', 256)
+        B, T, _ = x.shape
+        chunk_size = self.config['attention'].get('chunk_size', 256)
+        
+        # Process in chunks if sequence is long
+        if T <= chunk_size:
+            return super().forward(x, mask)
             
-            # Process in chunks if sequence is long
-            if T <= chunk_size:
-                return super().forward(x, mask)
-                
-            # Split into chunks
-            chunks = x.split(chunk_size, dim=1)
-            outputs = []
+        # Split into chunks
+        chunks = x.split(chunk_size, dim=1)
+        outputs = []
+        
+        for chunk in chunks:
+            outputs.append(super().forward(chunk, mask))
             
-            for chunk in chunks:
-                outputs.append(super().forward(chunk, mask))
-                
-            return torch.cat(outputs, dim=1)
+        return torch.cat(outputs, dim=1)
 
 
 class MultiHeadDenseCollaboration(BaseAttention):
@@ -159,31 +144,30 @@ class MultiHeadDenseCollaboration(BaseAttention):
         nn.init.kaiming_normal_(self.head_collab2.weight, mode='fan_out', nonlinearity='relu')
 
     def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        with torch.amp.autocast(**self._autocast_kwargs):
-            B, T, _ = x.shape
-            
-            # Project queries, keys, values
-            qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.unbind(0)
-            
-            # Compute base attention scores
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            
-            # Apply head collaboration
-            attn_scores = attn_scores.transpose(1, 2).reshape(B*T, self.heads, -1)
-            attn_scores = self.head_collab2(F.relu(self.head_collab1(attn_scores)))
-            attn_scores = attn_scores.reshape(B, T, self.heads, -1).transpose(1, 2)
-            
-            if mask:
-                attn_scores = self._apply_attention_mask(attn_scores)
-            
-            # Compute final output
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-            out = torch.matmul(attn_weights, v)
-            out = out.transpose(1, 2).reshape(B, T, -1)
-            
-            return self.out_proj(out)
+        B, T, _ = x.shape
+        
+        # Project queries, keys, values
+        qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        
+        # Compute base attention scores
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        # Apply head collaboration
+        attn_scores = attn_scores.transpose(1, 2).reshape(B*T, self.heads, -1)
+        attn_scores = self.head_collab2(F.relu(self.head_collab1(attn_scores)))
+        attn_scores = attn_scores.reshape(B, T, self.heads, -1).transpose(1, 2)
+        
+        if mask:
+            attn_scores = self._apply_attention_mask(attn_scores)
+        
+        # Compute final output
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        out = torch.matmul(attn_weights, v)
+        out = out.transpose(1, 2).reshape(B, T, -1)
+        
+        return self.out_proj(out)
 
 
 class CollaborativeAttention(BaseAttention):
@@ -198,31 +182,30 @@ class CollaborativeAttention(BaseAttention):
         nn.init.xavier_uniform_(self.content_bias.weight)
 
     def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        with torch.amp.autocast(**self._autocast_kwargs):
-            B, T, _ = x.shape
-            
-            # Project queries, keys, values
-            qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.unbind(0)
-            
-            # Apply learned mixing to queries
-            mixed_q = torch.einsum('bhnd,hd->bhnd', q, self.mixing)
-            
-            # Compute attention scores
-            attn_scores = torch.matmul(mixed_q, k.transpose(-2, -1)) * self.scale
-            
-            # Add content-based bias
-            k_reshaped = k.permute(0, 2, 1, 3).reshape(B, T, -1)
-            content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)
-            attn_scores += content_bias
-            
-            if mask:
-                attn_scores = self._apply_attention_mask(attn_scores)
-            
-            # Compute final output
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-            out = torch.matmul(attn_weights, v)
-            out = out.transpose(1, 2).reshape(B, T, -1)
-            
-            return self.out_proj(out)
+        B, T, _ = x.shape
+        
+        # Project queries, keys, values
+        qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        
+        # Apply learned mixing to queries
+        mixed_q = torch.einsum('bhnd,hd->bhnd', q, self.mixing)
+        
+        # Compute attention scores
+        attn_scores = torch.matmul(mixed_q, k.transpose(-2, -1)) * self.scale
+        
+        # Add content-based bias
+        k_reshaped = k.permute(0, 2, 1, 3).reshape(B, T, -1)
+        content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)
+        attn_scores += content_bias
+        
+        if mask:
+            attn_scores = self._apply_attention_mask(attn_scores)
+        
+        # Compute final output
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        out = torch.matmul(attn_weights, v)
+        out = out.transpose(1, 2).reshape(B, T, -1)
+        
+        return self.out_proj(out)
