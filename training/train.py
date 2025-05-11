@@ -147,76 +147,126 @@ class FocalLoss(nn.Module):
         return loss
 
 class DataModule(pl.LightningDataModule):
-    def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger = None):
+    def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger=None):
         super().__init__()
         self.config = config
         self.test_mode = test_mode
         self._setup_complete = False
         
         self._logger = setup_logger(self.__class__.__name__)
+        self._logger.info(f"Initializing DataModule with config: {config}")
         
-        # Initialize components
-        self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-        self.tokenizer = LogTokenizer(
-            config['tokenizer']['tokenizer_length'], 
-            tokenizer_path=config['tokenizer']['tokenizer_path']
-        )
-        self.template_miner.load_state()
+        # Log device info early
+        self._log_device_info()
         
-        # Dynamic dataset class loading
-        dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
-        self.dataset_class = getattr(dataset_module, "Dataset")
-        
-        # Initialize datasets
-        self.train_dataset = None
-        self.val_dataset = None
-        self.test_dataset = None
+        try:
+            # Initialize components
+            self._logger.debug("Initializing LogTemplateMiner...")
+            self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
+            
+            self._logger.debug("Initializing LogTokenizer...")
+            self.tokenizer = LogTokenizer(
+                config['tokenizer']['tokenizer_length'], 
+                tokenizer_path=config['tokenizer']['tokenizer_path']
+            )
+            
+            self._logger.debug("Loading template miner state...")
+            self.template_miner.load_state()
+            
+            # Dynamic dataset class loading
+            self._logger.debug(f"Loading dataset class: {config['dataset']['class']}")
+            dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
+            self.dataset_class = getattr(dataset_module, "Dataset")
+            
+            self._logger.info("DataModule components initialized successfully")
+        except Exception as e:
+            self._logger.error(f"Initialization failed: {str(e)}", exc_info=True)
+            raise
 
-    def prepare_data(self):
-        """One-time download/preparation steps"""
-        pass  # Add any data downloading/preprocessing here if needed
+    def _log_device_info(self):
+        """Log comprehensive device and environment information"""
+        self._logger.info("===== Environment Configuration =====")
+        self._logger.info(f"PyTorch Lightning v{pl.__version__}")
+        self._logger.info(f"PyTorch v{torch.__version__}")
+        self._logger.info(f"CUDA Available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            self._logger.info(f"Current Device: {torch.cuda.current_device()}")
+            self._logger.info(f"Device Name: {torch.cuda.get_device_name(0)}")
+        self._logger.info(f"Num CPUs: {os.cpu_count()}")
+        self._logger.info("====================================")
 
     def setup(self, stage: Optional[str] = None) -> None:
-        """Initialize datasets for each stage"""
+        """Initialize datasets for each stage with detailed logging"""
         if self._setup_complete:
+            self._logger.debug("Setup already complete, skipping")
             return
             
-        # Initialize full dataset
-        self.full_dataset = self.dataset_class(
-            path=self.config['dataset']['path'],
-            prediction_steps=self.config['model']['prediction_steps'],
-            context_length=self.config['model']['context_length'],
-            template_miner=self.template_miner.transform,
-            tokenizer=self.tokenizer.transform,
-            test_mode=self.test_mode
-        )
-
-        # Split dataset
-        if self.test_mode:
-            test_size = min(100, len(self.full_dataset) // 10)
-            train_size = len(self.full_dataset) - test_size
-            self.train_dataset, self.test_dataset = random_split(
-                self.full_dataset, 
-                [train_size, test_size],
-                generator=torch.Generator().manual_seed(42)
+        self._logger.info(f"Starting dataset setup for stage: {stage}")
+        
+        try:
+            # Initialize full dataset
+            self._logger.debug("Creating full dataset...")
+            self.full_dataset = self.dataset_class(
+                path=self.config['dataset']['path'],
+                prediction_steps=self.config['model']['prediction_steps'],
+                context_length=self.config['model']['context_length'],
+                template_miner=self.template_miner.transform,
+                tokenizer=self.tokenizer.transform,
+                test_mode=self.test_mode
             )
-            self.val_dataset = self.test_dataset
-        else:
-            val_size = min(int(0.2 * len(self.full_dataset)), 2500)
-            train_size = len(self.full_dataset) - val_size
-            self.train_dataset, self.val_dataset = random_split(
-                self.full_dataset,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
+            self._logger.info(f"Full dataset created with {len(self.full_dataset)} samples")
+            
+            # Validate dataset samples
+            self._logger.debug("Validating dataset samples...")
+            self._validate_dataset_shapes(self.full_dataset)
+            
+            # Split dataset
+            self._logger.debug("Splitting dataset...")
+            if self.test_mode:
+                test_size = min(100, len(self.full_dataset) // 10)
+                train_size = len(self.full_dataset) - test_size
+                self._logger.info(f"Test mode: splitting into {train_size} train, {test_size} test samples")
+                
+                self.train_dataset, self.test_dataset = random_split(
+                    self.full_dataset, 
+                    [train_size, test_size],
+                    generator=torch.Generator().manual_seed(42)
+                )
+                self.val_dataset = self.test_dataset
+            else:
+                val_size = min(int(0.2 * len(self.full_dataset)), 2500)
+                train_size = len(self.full_dataset) - val_size
+                self._logger.info(f"Train mode: splitting into {train_size} train, {val_size} val samples")
+                
+                self.train_dataset, self.val_dataset = random_split(
+                    self.full_dataset,
+                    [train_size, val_size],
+                    generator=torch.Generator().manual_seed(42)
+                )
 
-        self._setup_complete = True
-        self._logger.info(f"Dataset setup complete: {len(self.train_dataset)} train, {len(self.val_dataset)} val samples")
+            # Validate split datasets
+            self._logger.debug("Validating split datasets...")
+            if hasattr(self, 'train_dataset'):
+                self._validate_dataset_shapes(self.train_dataset)
+            if hasattr(self, 'val_dataset'):
+                self._validate_dataset_shapes(self.val_dataset)
+            if hasattr(self, 'test_dataset'):
+                self._validate_dataset_shapes(self.test_dataset)
+                
+            self._setup_complete = True
+            self._logger.info("Dataset setup completed successfully")
+            
+        except Exception as e:
+            self._logger.error(f"Dataset setup failed: {str(e)}", exc_info=True)
+            raise
 
     def _validate_dataset_shapes(self, dataset):
-        """Validate that dataset samples have expected shapes"""
+        """Enhanced dataset validation with detailed logging"""
+        self._logger.debug(f"Validating dataset with {len(dataset)} samples")
+        
         try:
-            for i in range(min(5, len(dataset))):  # Check first 5 samples
+            sample_count = min(5, len(dataset))  # Check first 5 samples
+            for i in range(sample_count):
                 input_window, output_window, sequences = dataset[i]
                 
                 self._logger.debug(f"Sample {i} shapes - "
@@ -224,57 +274,62 @@ class DataModule(pl.LightningDataModule):
                            f"output: {output_window.shape}, "
                            f"sequences: {sequences.shape}")
                 
+                # Validate shapes against config
                 assert len(input_window) == self.config['model']['context_length'], \
                     f"Input window length {len(input_window)} != context_length {self.config['model']['context_length']}"
                 
-                assert len(output_window) == self.config['model']['prediction_steps'], \
-                    f"Output window length {len(output_window)} != prediction_steps {self.config['model']['prediction_steps']}"
+                assert len(output_window) == self.config['model']['context_length'], \
+                    f"Output window length {len(output_window)} != prediction_length {self.config['model']['context_length']}"
                 
+                # Validate value ranges
+                if hasattr(self.tokenizer, 'vocab_size'):
+                    assert output_window.max() < self.tokenizer.vocab_size, \
+                        f"Output contains invalid token indices (max: {output_window.max()}, vocab size: {self.tokenizer.vocab_size})"
+                
+            self._logger.debug(f"Dataset validation passed for {sample_count} samples")
+            
         except Exception as e:
-            self._logger.error(f"Dataset validation failed: {str(e)}")
+            self._logger.error(f"Dataset validation failed on sample {i}: {str(e)}")
+            self._logger.error(f"Problematic sample - input: {input_window}, output: {output_window}")
             raise
 
     def get_class_weights(self, strategy: str = "inverse", max_samples: int = 1000) -> torch.Tensor:
-        """
-        Compute class weights to handle imbalance. Supports large datasets via sampling.
+        """Enhanced class weight calculation with logging"""
+        self._logger.info(f"Computing class weights using {strategy} strategy")
         
-        Args:
-            strategy (str): Weighting strategy:
-                - "inverse": 1 / class_count (default)
-                - "sqrt": 1 / sqrt(class_count)
-                - "balanced": (n_samples / n_classes) / class_count
-            max_samples (int): Cap on samples to process (for efficiency).
-        
-        Returns:
-            torch.Tensor: [vocab_size] tensor of class weights.
-        """
         if not self._setup_complete:
+            self._logger.debug("Running setup for weight calculation")
             self.setup()
 
         vocab_size = self.config['model']['vocab_size']
         counts = torch.zeros(vocab_size, dtype=torch.long)
         
-        # Sample a subset if dataset is large
+        # Sample processing
         n_samples = min(len(self.train_dataset), max_samples)
         indices = torch.randperm(len(self.train_dataset))[:n_samples]
+        self._logger.debug(f"Processing {n_samples} samples for class weights")
         
-        # Process all samples at once if possible (more efficient)
         try:
-            # Try to get all targets in one batch
-            all_targets = torch.cat([self.train_dataset[idx][0].flatten() for idx in indices])
+            # Batch processing attempt
+            all_targets = torch.cat([self.train_dataset[idx][1].flatten() for idx in indices])
             unique, counts_batch = torch.unique(all_targets, return_counts=True)
             counts[unique] += counts_batch
-        except (MemoryError, RuntimeError):
-            # Fall back to per-sample processing if batch processing fails
+            self._logger.debug("Processed targets in batch mode")
+        except (MemoryError, RuntimeError) as e:
+            self._logger.warning(f"Batch processing failed, falling back to iterative: {str(e)}")
+            # Iterative processing
             for idx in indices:
                 _, targets, _ = self.train_dataset[idx]
                 unique, counts_batch = torch.unique(targets.flatten(), return_counts=True)
                 counts[unique] += counts_batch
+            self._logger.debug("Processed targets iteratively")
         
-        # Avoid division by zero for unseen classes
+        # Log class distribution
+        self._logger.debug(f"Class distribution - min: {counts.min()}, max: {counts.max()}, mean: {counts.float().mean()}")
+        
         counts = counts.float() + 1e-6  # Smoothing
         
-        # Compute weights based on strategy
+        # Weight calculation
         if strategy == "inverse":
             weights = 1.0 / counts
         elif strategy == "sqrt":
@@ -284,43 +339,49 @@ class DataModule(pl.LightningDataModule):
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
         
-        # Normalize to sum to vocab_size (optional)
         weights = weights * (vocab_size / weights.sum())
         
+        self._logger.info(f"Class weights computed - min: {weights.min():.2f}, max: {weights.max():.2f}")
         return weights
-    
+
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=True,
-            num_workers=self.config['dataset'].get('num_workers'),
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=True
-        )
+        self._logger.debug("Creating train DataLoader")
+        return self._create_dataloader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=False,
-            num_workers=self.config['dataset'].get('num_workers'),
-            pin_memory=True,
-            persistent_workers=True
-        )
+        self._logger.debug("Creating val DataLoader")
+        return self._create_dataloader(self.val_dataset, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
         if not hasattr(self, 'test_dataset'):
+            self._logger.debug("No test dataset available")
             return None
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=False,
-            num_workers=self.config['dataset'].get('num_workers'),
-            pin_memory=True
-        )
+        self._logger.debug("Creating test DataLoader")
+        return self._create_dataloader(self.test_dataset, shuffle=False)
 
+    def _create_dataloader(self, dataset, shuffle: bool) -> DataLoader:
+        """Centralized DataLoader creation with validation"""
+        if dataset is None:
+            self._logger.warning("Attempted to create DataLoader with None dataset")
+            return None
+            
+        self._logger.debug(f"Creating DataLoader with {len(dataset)} samples (shuffle={shuffle})")
+        
+        try:
+            loader = DataLoader(
+                dataset,
+                batch_size=self.config['training']['batch_size'],
+                shuffle=shuffle,
+                num_workers=self.config['dataset'].get('num_workers', 0),
+                pin_memory=torch.cuda.is_available(),
+                persistent_workers=self.config['dataset'].get('num_workers', 0) > 0,
+                drop_last=shuffle  # Only drop last for training
+            )
+            self._logger.debug("DataLoader created successfully")
+            return loader
+        except Exception as e:
+            self._logger.error(f"DataLoader creation failed: {str(e)}")
+            raise
 
 class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
