@@ -16,6 +16,8 @@ from training import DataModule, TransformerLightning
 import socket
 import random
 
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
+
 def find_free_port() -> int:
     """Find a random available port."""
     while True:
@@ -129,8 +131,8 @@ def train_with_config(
         logger.debug("Initializing model")
         model = TransformerLightning(
             config, 
+            class_weights,  # Changed from class_weights
             config_name, 
-            class_weights=class_weights,  # Changed from class_weights
             important_classes=important_errors,
         )
 

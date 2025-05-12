@@ -20,6 +20,7 @@ import os
 import logging
 
 logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)  
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
@@ -51,13 +52,17 @@ class BLEUScore(Metric):
         self.max_n = max_n
         self.weights = weights or [1/max_n] * max_n
         
-        # Store predictions and references as lists of tensors
         self.add_state("predictions", default=[], dist_reduce_fx="cat")
         self.add_state("references", default=[], dist_reduce_fx="cat")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         """Store tensors directly (GPU-compatible)"""
-        # Detach and clone to avoid memory leaks
+        # Ensure we're working with sequences (2D tensors)
+        if preds.ndim == 1:
+            preds = preds.unsqueeze(-1)
+        if target.ndim == 1:
+            target = target.unsqueeze(-1)
+            
         self.predictions.append(preds.detach().clone())
         self.references.append(target.detach().clone())
 
@@ -72,8 +77,9 @@ class BLEUScore(Metric):
         
         total = 0.0
         for pred, ref in zip(preds_cpu, refs_cpu):
-            pred_str = list(map(str, pred))
-            ref_str = [list(map(str, ref))]
+            # Convert arrays to lists of strings
+            pred_str = [str(x) for x in pred]
+            ref_str = [[str(x) for x in ref]]  # Note double list for references
             
             score = sentence_bleu(
                 ref_str, 
@@ -95,6 +101,12 @@ class ROUGELScore(Metric):
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         """Store batch tensors (GPU-compatible)"""
+        # Ensure we're working with sequences (2D tensors)
+        if preds.ndim == 1:
+            preds = preds.unsqueeze(-1)
+        if target.ndim == 1:
+            target = target.unsqueeze(-1)
+            
         self.predictions.append(preds.detach().clone())
         self.references.append(target.detach().clone())
 
@@ -107,9 +119,13 @@ class ROUGELScore(Metric):
         preds_cpu = torch.cat(self.predictions).cpu().numpy()
         refs_cpu = torch.cat(self.references).cpu().numpy()
         
-        # Convert to strings in bulk
-        pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
-        ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
+        # Convert to strings - handling both sequences and single tokens
+        if preds_cpu.ndim == 1:
+            pred_strs = [str(p) for p in preds_cpu]
+            ref_strs = [str(r) for r in refs_cpu]
+        else:
+            pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
+            ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
         
         # Batch compute ROUGE
         results = self.rouge.compute(
@@ -118,7 +134,15 @@ class ROUGELScore(Metric):
             rouge_types=['rougeL']
         )
         
-        return torch.tensor(results['rougeL'].mid.fmeasure, device=self.device)
+        # Handle different output formats from evaluate library
+        if isinstance(results['rougeL'], dict):
+            # Old format: {'rougeL': {'mid': {'fmeasure': float}}}
+            rouge_score = results['rougeL']['mid']['fmeasure']
+        else:
+            # New format: {'rougeL': float}
+            rouge_score = results['rougeL']
+        
+        return torch.tensor(rouge_score, device=self.device)
 
 class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
@@ -140,7 +164,6 @@ class ImportantClassWrapper(torchmetrics.Metric):
             # Ensure preds and target are on same device
             preds = preds.to(target.device)
             self.metric.update(preds[mask], target[mask])
-            self._seen_samples += mask.sum().item()
 
     def compute(self):
         result = self.metric.compute()
@@ -627,11 +650,6 @@ class TransformerLightning(pl.LightningModule):
                 })
             else:
                 metrics['val/important_f1'] = important_metrics
-            
-            metrics['val/important_samples'] = torch.tensor(
-                float(self.val_important._seen_samples),
-                device=self.device
-            )
         
         self.log_dict(metrics, prog_bar=False, sync_dist=True)
         
