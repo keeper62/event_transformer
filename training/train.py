@@ -8,13 +8,12 @@ from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
 
-from torch.functional import F
 
-import torch
+from torchmetrics import Metric
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
+import evaluate
 
 import os
 
@@ -45,14 +44,88 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     
     return logger
 
+class BLEUScore(Metric):
+    """GPU-compatible BLEU score metric with proper tensor handling"""
+    def __init__(self, max_n=4, weights=None, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.max_n = max_n
+        self.weights = weights or [1/max_n] * max_n
+        
+        # Store predictions and references as lists of tensors
+        self.add_state("predictions", default=[], dist_reduce_fx="cat")
+        self.add_state("references", default=[], dist_reduce_fx="cat")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """Store tensors directly (GPU-compatible)"""
+        # Detach and clone to avoid memory leaks
+        self.predictions.append(preds.detach().clone())
+        self.references.append(target.detach().clone())
+
+    def compute(self):
+        """Calculate BLEU score with proper GPU handling"""
+        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+        smoother = SmoothingFunction().method1
+        
+        # Move all tensors to CPU at once for efficiency
+        preds_cpu = torch.cat(self.predictions).cpu().numpy()
+        refs_cpu = torch.cat(self.references).cpu().numpy()
+        
+        total = 0.0
+        for pred, ref in zip(preds_cpu, refs_cpu):
+            pred_str = list(map(str, pred))
+            ref_str = [list(map(str, ref))]
+            
+            score = sentence_bleu(
+                ref_str, 
+                pred_str, 
+                weights=self.weights,
+                smoothing_function=smoother
+            )
+            total += score
+        
+        return torch.tensor(total / len(preds_cpu), device=self.device)
+
+class ROUGELScore(Metric):
+    """GPU-compatible ROUGE-L metric with batch processing"""
+    def __init__(self, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.rouge = evaluate.load('rouge')
+        self.add_state("predictions", default=[], dist_reduce_fx="cat")
+        self.add_state("references", default=[], dist_reduce_fx="cat")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """Store batch tensors (GPU-compatible)"""
+        self.predictions.append(preds.detach().clone())
+        self.references.append(target.detach().clone())
+
+    def compute(self):
+        """Batch process ROUGE-L on CPU"""
+        if not self.predictions:
+            return torch.tensor(0.0, device=self.device)
+            
+        # Concatenate all batches and move to CPU once
+        preds_cpu = torch.cat(self.predictions).cpu().numpy()
+        refs_cpu = torch.cat(self.references).cpu().numpy()
+        
+        # Convert to strings in bulk
+        pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
+        ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
+        
+        # Batch compute ROUGE
+        results = self.rouge.compute(
+            predictions=pred_strs,
+            references=ref_strs,
+            rouge_types=['rougeL']
+        )
+        
+        return torch.tensor(results['rougeL'].mid.fmeasure, device=self.device)
+
 class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
         super().__init__()
         self.metric = metric
         self.important_classes = important_classes.to('cpu')  # Store on CPU
         self.prefix = prefix
-        self._seen_samples = 0
-        self._has_updates = False
 
     def update(self, preds, target):
         # Move important_classes to target device
@@ -68,27 +141,12 @@ class ImportantClassWrapper(torchmetrics.Metric):
             preds = preds.to(target.device)
             self.metric.update(preds[mask], target[mask])
             self._seen_samples += mask.sum().item()
-            self._has_updates = True
 
     def compute(self):
-        if not self._has_updates:
-            # Create NaN tensor on correct device
-            if hasattr(self, 'device'):  # Use metric's device if available
-                device = self.device
-            else:
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                
-            return {f"{self.prefix}f1": torch.tensor(float('nan'), device=device)}
-        
         result = self.metric.compute()
         if isinstance(result, dict):
             return {f"{self.prefix}{k}": v for k, v in result.items()}
         return {f"{self.prefix}score": result}
-
-    def reset(self):
-        self.metric.reset()
-        self._seen_samples = 0
-        self._has_updates = False
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -400,7 +458,7 @@ class DataModule(pl.LightningDataModule):
             raise
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], config_name: str, class_weights: torch.Tensor, 
+    def __init__(self, config: Dict[str, Any], class_weights: torch.Tensor, config_name: Optional[str] = None, 
                 important_classes: torch.Tensor | None = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
@@ -476,7 +534,6 @@ class TransformerLightning(pl.LightningModule):
 
     def _init_metrics(self):
         """Initialize all TorchMetrics for evaluation"""
-    # Common settings
         metric_args = {
             'task': 'binary'
         }
@@ -484,15 +541,15 @@ class TransformerLightning(pl.LightningModule):
         
         # Validation metrics
         self.val_acc = torchmetrics.Accuracy(**metric_args)
-        self.val_precision = torchmetrics.Precision(**metric_args)
-        self.val_recall = torchmetrics.Recall(**metric_args)
-        self.val_f1 = torchmetrics.F1Score(**metric_args)
-        
         self.val_top5 = torchmetrics.Accuracy(
             task='multiclass',
             num_classes=self.num_classes,
             top_k=5
         )
+        
+        # New metrics
+        self.val_bleu = BLEUScore(max_n=4)  # Average of BLEU-1 to BLEU-4
+        self.val_rouge = ROUGELScore()
         
         # Important classes (keep original multi-class behavior)
         if self.important_classes is not None:
@@ -536,18 +593,15 @@ class TransformerLightning(pl.LightningModule):
         
         # Get predictions
         preds = logits.argmax(dim=-1)
-        is_correct = (preds == targets)  # Binary correctness [N*B]
         
-        # Update binary metrics
-        self.val_acc.update(is_correct, torch.ones_like(is_correct))  # Targets are all "1" (correct)
-        self.val_precision.update(is_correct, torch.ones_like(is_correct))
-        self.val_recall.update(is_correct, torch.ones_like(is_correct))
-        self.val_f1.update(is_correct, torch.ones_like(is_correct))
-        
-        # Update top-5 (still multiclass)
+        # Update metrics
+        self.val_acc.update((preds == targets).float(), torch.ones_like(targets))
         self.val_top5.update(logits, targets)
         
-        # Update important class metrics (original multi-class)
+        # Update sequence metrics (BLEU & ROUGE)
+        self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
+        self.val_rouge.update(preds, targets)
+        
         if hasattr(self, 'val_important'):
             self.val_important(preds, targets)
         
@@ -559,9 +613,8 @@ class TransformerLightning(pl.LightningModule):
         metrics = {
             'val/acc': self.val_acc.compute(),
             'val/top5_acc': self.val_top5.compute(),
-            'val/precision': self.val_precision.compute(),
-            'val/recall': self.val_recall.compute(),
-            'val/f1': self.val_f1.compute(),
+            'val/bleu': self.val_bleu.compute(),  # Average BLEU-1 to BLEU-4
+            'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
         }
            
         # Handle important classes
@@ -575,9 +628,8 @@ class TransformerLightning(pl.LightningModule):
             else:
                 metrics['val/important_f1'] = important_metrics
             
-            # Convert sample count to float explicitly
             metrics['val/important_samples'] = torch.tensor(
-                float(self.val_important._seen_samples),  # Explicit float conversion
+                float(self.val_important._seen_samples),
                 device=self.device
             )
         
@@ -586,9 +638,8 @@ class TransformerLightning(pl.LightningModule):
         # Reset all metrics
         self.val_acc.reset()
         self.val_top5.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
-        self.val_f1.reset()
+        self.val_bleu.reset()
+        self.val_rouge.reset()
         
         if hasattr(self, 'val_important'):
             self.val_important.reset()
