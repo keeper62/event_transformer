@@ -6,22 +6,6 @@ import importlib
 from typing import Callable, Optional, Dict, Any, Tuple
 from pathlib import Path
 
-class BiasInjection(nn.Module):
-    def __init__(self, method: str, scale: float = 0.1):
-        super().__init__()
-        self.method = method  # "attention", "ffn", "residual"
-        self.scale = scale
-
-    def forward(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
-        if self.method == "attention":
-            return x + self.scale * bias  # Bias attention output
-        elif self.method == "ffn":
-            return x + self.scale * bias  # Bias FFN output
-        elif self.method == "residual":
-            return x + self.scale * bias  # Bias residual path
-        else:
-            raise ValueError(f"Unknown bias method: {self.method}")
-
 class TransformerDecoderLayer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
@@ -34,7 +18,6 @@ class TransformerDecoderLayer(nn.Module):
         self._init_configurations(config)  # <- Now called before components
         self._init_components(config)
         
-        self.bias_injector = BiasInjection(self.model_cfg['bias_injection'], self.model_cfg['bias_scale'])
         self.template_embed = nn.Embedding(self.vocab_size, self.embed_dim)
         self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
@@ -88,7 +71,7 @@ class TransformerDecoderLayer(nn.Module):
         x_out = sublayer_fn(x, attention_mask)
         
         if bias is not None:
-            x_out = self.bias_injector(x_out, bias)
+            x_out = x_out + self.model_cfg['bias_scale'] * bias
             
         x_out = dropout(x_out)
         
@@ -106,7 +89,7 @@ class TransformerDecoderLayer(nn.Module):
             lambda x, mask: self.attn(x, mask=mask),
             self.norm1,
             self.attn_dropout,
-            embed_bias if self.bias_injector.method == "attention" else None,
+            embed_bias if self.model_cfg['bias_injection'] == "attention" else None,
             attention_mask=True
         )
         
@@ -116,7 +99,7 @@ class TransformerDecoderLayer(nn.Module):
             lambda x, _: self.attn(x),  # Ignore mask for cross-attention
             self.norm2,
             self.attn_dropout,
-            embed_bias if self.bias_injector.method == "attention" else None
+            embed_bias if self.model_cfg['bias_injection'] == "attention" else None
         )
         
         # Sublayer 3: FFN
@@ -125,7 +108,7 @@ class TransformerDecoderLayer(nn.Module):
             lambda x, _: self.ffn(x),  # FFN doesn't use mask
             self.norm3,
             self.ffn_dropout,
-            embed_bias if self.bias_injector.method == "ffn" else None
+            embed_bias if self.model_cfg['bias_injection'] == "ffn" else None
         )
         
         return x
