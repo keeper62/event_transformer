@@ -47,95 +47,77 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     return logger
 
 class BLEUScore(Metric):
-    """GPU-compatible BLEU score metric with proper tensor handling"""
+    """Memory-efficient BLEU score metric"""
     def __init__(self, max_n=4, weights=None, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
         self.max_n = max_n
         self.weights = weights or [1/max_n] * max_n
         
-        self.add_state("predictions", default=[], dist_reduce_fx="cat")
-        self.add_state("references", default=[], dist_reduce_fx="cat")
+        # Store strings directly to save memory
+        self.add_state("pred_strs", default=[], dist_reduce_fx="cat")
+        self.add_state("ref_strs", default=[], dist_reduce_fx="cat")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """Store tensors directly (GPU-compatible)"""
+        """Convert to strings immediately to save memory"""
         # Ensure we're working with sequences (2D tensors)
         if preds.ndim == 1:
             preds = preds.unsqueeze(-1)
         if target.ndim == 1:
             target = target.unsqueeze(-1)
-            
-        self.predictions.append(preds.detach().clone())
-        self.references.append(target.detach().clone())
+        
+        # Convert to strings immediately and free GPU memory
+        preds_cpu = preds.cpu().numpy()
+        refs_cpu = target.cpu().numpy()
+        
+        if preds_cpu.ndim == 1:
+            pred_str = [str(x) for x in preds_cpu]
+            ref_str = [[str(x) for x in refs_cpu]]
+        else:
+            pred_str = [" ".join(map(str, p)) for p in preds_cpu]
+            ref_str = [[" ".join(map(str, r))] for r in refs_cpu]
+        
+        self.pred_strs.extend(pred_str)
+        self.ref_strs.extend(ref_str)
 
     def compute(self):
-        """Calculate BLEU score with proper GPU handling"""
+        """Calculate BLEU score"""
         from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
         smoother = SmoothingFunction().method1
         
-        if not self.predictions:
+        if not self.pred_strs:
             return torch.tensor(0.0, device=self.device)
 
-        # Handle case where predictions is already a tensor (multi-GPU)
-        if isinstance(self.predictions, torch.Tensor):
-            preds_cpu = self.predictions.cpu().numpy()
-            refs_cpu = self.references.cpu().numpy()
-        # Handle case where predictions is a list (single-GPU)
-        else:
-            if len(self.predictions) == 1:
-                preds_cpu = self.predictions[0].cpu().numpy()
-                refs_cpu = self.references[0].cpu().numpy()
-            else:
-                preds_cpu = torch.cat(self.predictions).cpu().numpy()
-                refs_cpu = torch.cat(self.references).cpu().numpy()
-        
         total = 0.0
-        for pred, ref in zip(preds_cpu, refs_cpu):
-            # Convert arrays to lists of strings
-            pred_str = [str(x) for x in pred]
-            ref_str = [[str(x) for x in ref]]  # Note double list for references
-            
+        for pred, ref in zip(self.pred_strs, self.ref_strs):
             score = sentence_bleu(
-                ref_str, 
-                pred_str, 
+                ref, 
+                pred, 
                 weights=self.weights,
                 smoothing_function=smoother
             )
             total += score
         
-        return torch.tensor(total / len(preds_cpu), device=self.device)
+        return torch.tensor(total / len(self.pred_strs), device=self.device)
 
 class ROUGELScore(Metric):
+    """Memory-efficient ROUGE-L score metric"""
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.add_state("predictions", default=[], dist_reduce_fx="cat")
-        self.add_state("references", default=[], dist_reduce_fx="cat")
+        # Store strings directly to save memory
+        self.add_state("pred_strs", default=[], dist_reduce_fx="cat")
+        self.add_state("ref_strs", default=[], dist_reduce_fx="cat")
         self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """Convert to strings immediately to save memory"""
         if preds.ndim == 1:
             preds = preds.unsqueeze(-1)
         if target.ndim == 1:
             target = target.unsqueeze(-1)
 
-        self.predictions.append(preds.detach().clone())
-        self.references.append(target.detach().clone())
-
-    def compute(self):
-        if not self.predictions:
-            return torch.tensor(0.0, device=self.device)
-
-        # Handle case where predictions is already a tensor (multi-GPU)
-        if isinstance(self.predictions, torch.Tensor):
-            preds_cpu = self.predictions.cpu().numpy()
-            refs_cpu = self.references.cpu().numpy()
-        # Handle case where predictions is a list (single-GPU)
-        else:
-            if len(self.predictions) == 1:
-                preds_cpu = self.predictions[0].cpu().numpy()
-                refs_cpu = self.references[0].cpu().numpy()
-            else:
-                preds_cpu = torch.cat(self.predictions).cpu().numpy()
-                refs_cpu = torch.cat(self.references).cpu().numpy()
+        # Convert to strings immediately and free GPU memory
+        preds_cpu = preds.cpu().numpy()
+        refs_cpu = target.cpu().numpy()
 
         if preds_cpu.ndim == 1:
             pred_strs = [str(p) for p in preds_cpu]
@@ -144,9 +126,16 @@ class ROUGELScore(Metric):
             pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
             ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
 
+        self.pred_strs.extend(pred_strs)
+        self.ref_strs.extend(ref_strs)
+
+    def compute(self):
+        if not self.pred_strs:
+            return torch.tensor(0.0, device=self.device)
+
         scores = [
             self.scorer.score(ref, pred)['rougeL'].fmeasure
-            for pred, ref in zip(pred_strs, ref_strs)
+            for pred, ref in zip(self.pred_strs, self.ref_strs)
         ]
 
         return torch.tensor(sum(scores) / len(scores), device=self.device)
@@ -629,8 +618,8 @@ class TransformerLightning(pl.LightningModule):
         self.val_top5.update(logits, targets)
         
         # Update sequence metrics (BLEU & ROUGE)
-        self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
-        self.val_rouge.update(preds, targets)
+        #self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
+        #self.val_rouge.update(preds, targets)
         
         if hasattr(self, 'val_important'):
             self.val_important(preds, targets)
@@ -643,8 +632,8 @@ class TransformerLightning(pl.LightningModule):
         metrics = {
             'val/acc': self.val_acc.compute(),
             'val/top5_acc': self.val_top5.compute(),
-            'val/bleu': self.val_bleu.compute(), 
-            'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
+            #'val/bleu': self.val_bleu.compute(), 
+            #'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
         }
            
         # Handle important classes
