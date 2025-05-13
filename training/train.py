@@ -21,7 +21,7 @@ import logging
 
 from rouge_score import rouge_scorer
 
-logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
+logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)  
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
@@ -33,7 +33,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.propagate = False  # Critical for PL compatibility
     
     if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only    
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
@@ -41,7 +41,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
