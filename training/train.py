@@ -319,7 +319,7 @@ class DataModule(pl.LightningDataModule):
             self._logger.error(f"Problematic sample - input: {input_window}, output: {output_window}")
             raise
 
-    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 1000) -> torch.Tensor:
+    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 100000) -> torch.Tensor:
         self._logger.info("Computing class weights...")
         
         if not self._setup_complete:
@@ -502,20 +502,23 @@ class TransformerLightning(pl.LightningModule):
 
     def _init_metrics(self):
         """Initialize all TorchMetrics for evaluation"""
-        metric_args = {
-            'task': 'binary'
-        }
-        self.train_acc = torchmetrics.Accuracy(**metric_args)
+        # Training metrics
+        self.train_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
+        self.train_top5 = torchmetrics.Accuracy(
+            task='multiclass',
+            num_classes=self.num_classes,
+            top_k=5
+        )
         
         # Validation metrics
-        self.val_acc = torchmetrics.Accuracy(**metric_args)
+        self.val_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
         self.val_top5 = torchmetrics.Accuracy(
             task='multiclass',
             num_classes=self.num_classes,
             top_k=5
         )
         
-        # New metrics
+        # Sequence metrics
         self.val_bleu = BLEUScore(max_n=4)  # Average of BLEU-1 to BLEU-4
         self.val_rouge = ROUGELScore()
 
@@ -551,13 +554,12 @@ class TransformerLightning(pl.LightningModule):
         preds = logits.argmax(dim=-1)
         
         # Update metrics
-        self.val_acc.update((preds == targets).float(), torch.ones_like(targets))
+        self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
         
         # Update sequence metrics (BLEU & ROUGE)
         self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
         self.val_rouge.update(preds, targets)
-        
         
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
@@ -593,20 +595,39 @@ class TransformerLightning(pl.LightningModule):
             self.val_bleu.reset()
             self.val_rouge.reset()
         
-
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Compute training accuracy (binary)
+        # Compute training accuracy
         preds = logits.argmax(dim=-1)
-        is_correct = (preds == targets).float()
-        self.train_acc.update(is_correct, torch.ones_like(is_correct))
         
+        # Update training metrics
+        self.train_acc.update(preds, targets)
+        self.train_top5.update(logits, targets)
+        
+        # Log metrics
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/acc", self.train_acc, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
+        self.log("train/acc", self.train_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/top5_acc", self.train_top5, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         return loss
+    
+    def on_train_epoch_end(self):
+        """Log training metrics at epoch end"""
+        try:
+            train_acc = self.train_acc.compute()
+            train_top5 = self.train_top5.compute()
+            
+            self.log("train/epoch_acc", train_acc, prog_bar=False, sync_dist=True)
+            self.log("train/epoch_top5", train_top5, prog_bar=False, sync_dist=True)
+            
+            self._logger.info(f"Training Accuracy: {train_acc:.4f}, Top-5 Accuracy: {train_top5:.4f}")
+        except Exception as e:
+            self._logger.warning(f"Failed to compute training metrics: {str(e)}")
+        finally:
+            self.train_acc.reset()
+            self.train_top5.reset()
     
     def on_train_batch_start(self, batch, batch_idx):
         if batch_idx % 100 == 0:
