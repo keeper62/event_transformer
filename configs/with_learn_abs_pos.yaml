@@ -19,6 +19,10 @@ base_config:
         meaning_vocab_size: 1825 # Vocabulary size for the meaning embedding
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
+        # Bias specific
+        bias_injection: "attention"  # Options: "attention", "ffn"
+        bias_scale: 0.1              # Float multiplier for the bias strength
+
     # Training Parameters
     training:
         num_epochs: 32

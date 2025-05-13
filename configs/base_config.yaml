@@ -19,7 +19,7 @@ base_config:
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
         # Bias specific
-        bias_injection: "residual"  # Options: "attention", "ffn", "residual"
+        bias_injection: "attention"  # Options: "attention", "ffn"
         bias_scale: 0.1              # Float multiplier for the bias strength
 
     # Training Parameters
