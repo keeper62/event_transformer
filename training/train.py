@@ -13,7 +13,7 @@ from torchmetrics import Metric
 import torch.nn as nn
 import torch.nn.functional as F
 
-import evaluate
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 import os
 
@@ -47,99 +47,80 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     return logger
 
 class BLEUScore(Metric):
-    """Memory-efficient BLEU score metric"""
     def __init__(self, max_n=4, weights=None, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
         self.max_n = max_n
         self.weights = weights or [1/max_n] * max_n
+        self.smoother = SmoothingFunction().method1
         
-        # Store strings directly to save memory
-        self.add_state("pred_strs", default=[], dist_reduce_fx="cat")
-        self.add_state("ref_strs", default=[], dist_reduce_fx="cat")
+        # Store counts and sums instead of strings
+        self.add_state("total_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """Convert to strings immediately to save memory"""
-        # Ensure we're working with sequences (2D tensors)
-        if preds.ndim == 1:
-            preds = preds.unsqueeze(-1)
-        if target.ndim == 1:
-            target = target.unsqueeze(-1)
-        
-        # Convert to strings immediately and free GPU memory
         preds_cpu = preds.cpu().numpy()
-        refs_cpu = target.cpu().numpy()
+        target_cpu = target.cpu().numpy()
         
         if preds_cpu.ndim == 1:
-            pred_str = [str(x) for x in preds_cpu]
-            ref_str = [[str(x) for x in refs_cpu]]
+            pred_strs = [str(x) for x in preds_cpu]
+            ref_strs = [[str(x) for x in target_cpu]]
         else:
-            pred_str = [" ".join(map(str, p)) for p in preds_cpu]
-            ref_str = [[" ".join(map(str, r))] for r in refs_cpu]
-        
-        self.pred_strs.extend(pred_str)
-        self.ref_strs.extend(ref_str)
+            pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
+            ref_strs = [[" ".join(map(str, r))] for r in target_cpu]
 
-    def compute(self):
-        """Calculate BLEU score"""
-        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-        smoother = SmoothingFunction().method1
-        
-        if not self.pred_strs:
-            return torch.tensor(0.0, device=self.device)
-
-        total = 0.0
-        for pred, ref in zip(self.pred_strs, self.ref_strs):
-            score = sentence_bleu(
+        batch_scores = [
+            sentence_bleu(
                 ref, 
                 pred, 
                 weights=self.weights,
-                smoothing_function=smoother
+                smoothing_function=self.smoother
             )
-            total += score
+            for pred, ref in zip(pred_strs, ref_strs)
+        ]
         
-        return torch.tensor(total / len(self.pred_strs), device=self.device)
+        self.total_score += sum(batch_scores)
+        self.total_count += len(batch_scores)
 
+    def compute(self):
+        if self.total_count == 0:
+            return torch.tensor(0.0, device=self.device)
+        return self.total_score / self.total_count
+    
 class ROUGELScore(Metric):
-    """Memory-efficient ROUGE-L score metric"""
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        # Store strings directly to save memory
-        self.add_state("pred_strs", default=[], dist_reduce_fx="cat")
-        self.add_state("ref_strs", default=[], dist_reduce_fx="cat")
+        # Store counts and sums instead of strings
+        self.add_state("total_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_count", default=torch.tensor(0), dist_reduce_fx="sum")
         self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """Convert to strings immediately to save memory"""
-        if preds.ndim == 1:
-            preds = preds.unsqueeze(-1)
-        if target.ndim == 1:
-            target = target.unsqueeze(-1)
-
-        # Convert to strings immediately and free GPU memory
+        # Convert to CPU numpy arrays immediately
         preds_cpu = preds.cpu().numpy()
-        refs_cpu = target.cpu().numpy()
-
+        target_cpu = target.cpu().numpy()
+        
+        # Handle 1D and 2D cases
         if preds_cpu.ndim == 1:
             pred_strs = [str(p) for p in preds_cpu]
-            ref_strs = [str(r) for r in refs_cpu]
+            ref_strs = [str(r) for r in target_cpu]
         else:
             pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
-            ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
+            ref_strs = [" ".join(map(str, r)) for r in target_cpu]
 
-        self.pred_strs.extend(pred_strs)
-        self.ref_strs.extend(ref_strs)
+        # Calculate scores immediately and store aggregates
+        batch_scores = [
+            self.scorer.score(ref, pred)['rougeL'].fmeasure
+            for pred, ref in zip(pred_strs, ref_strs)
+        ]
+        
+        self.total_score += sum(batch_scores)
+        self.total_count += len(batch_scores)
 
     def compute(self):
-        if not self.pred_strs:
+        if self.total_count == 0:
             return torch.tensor(0.0, device=self.device)
-
-        scores = [
-            self.scorer.score(ref, pred)['rougeL'].fmeasure
-            for pred, ref in zip(self.pred_strs, self.ref_strs)
-        ]
-
-        return torch.tensor(sum(scores) / len(scores), device=self.device)
-
+        return self.total_score / self.total_count
+    
 class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
         super().__init__()
@@ -618,8 +599,8 @@ class TransformerLightning(pl.LightningModule):
         self.val_top5.update(logits, targets)
         
         # Update sequence metrics (BLEU & ROUGE)
-        #self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
-        #self.val_rouge.update(preds, targets)
+        self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
+        self.val_rouge.update(preds, targets)
         
         if hasattr(self, 'val_important'):
             self.val_important(preds, targets)
@@ -632,8 +613,8 @@ class TransformerLightning(pl.LightningModule):
         metrics = {
             'val/acc': self.val_acc.compute(),
             'val/top5_acc': self.val_top5.compute(),
-            #'val/bleu': self.val_bleu.compute(), 
-            #'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
+            'val/bleu': self.val_bleu.compute(), 
+            'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
         }
            
         # Handle important classes
