@@ -81,7 +81,8 @@ class TransformerDecoderLayer(nn.Module):
         return residual_connection + (x_out * self.residual_scaling)
 
     def _forward_impl(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)
+        if self.model_cfg['bias_injection'] is not None:
+            embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)
         
         # Sublayer 1: Masked Self-Attention
         x = self._forward_sublayer(

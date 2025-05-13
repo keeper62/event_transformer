@@ -46,111 +46,102 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     
     return logger
 
-class BLEUScore(Metric):
+class BLEUScore(torchmetrics.Metric):
     def __init__(self, max_n=4, weights=None, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.max_n = max_n
-        self.weights = weights or [1/max_n] * max_n
-        self.smoother = SmoothingFunction().method1
         
-        # Store counts and sums instead of strings
-        self.add_state("total_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total_count", default=torch.tensor(0), dist_reduce_fx="sum")
+        # Pre-allocate state
+        self.add_state("sum_scores", default=torch.zeros(1, dtype=torch.float64),
+                      dist_reduce_fx="sum")
+        self.add_state("n_samples", default=torch.zeros(1, dtype=torch.long),
+                      dist_reduce_fx="sum")
+        
+        # Pre-compute weights
+        self.weights = weights or [1.0/max_n] * max_n
+        self.smoother = SmoothingFunction().method1
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        preds_cpu = preds.cpu().numpy()
-        target_cpu = target.cpu().numpy()
+        preds_np = preds.cpu().numpy()
+        targets_np = target.cpu().numpy()
         
-        if preds_cpu.ndim == 1:
-            pred_strs = [str(x) for x in preds_cpu]
-            ref_strs = [[str(x) for x in target_cpu]]
-        else:
-            pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
-            ref_strs = [[" ".join(map(str, r))] for r in target_cpu]
-
-        batch_scores = [
-            sentence_bleu(
-                ref, 
-                pred, 
+        # Reuse buffers for token storage
+        batch_scores = []
+        for p, r in zip(preds_np, targets_np):
+            pred_tokens = [str(x) for x in (p if p.ndim > 0 else [p])]
+            ref_tokens = [[str(x) for x in (r if r.ndim > 0 else [r])]]
+            
+            batch_scores.append(sentence_bleu(
+                ref_tokens, pred_tokens,
                 weights=self.weights,
                 smoothing_function=self.smoother
-            )
-            for pred, ref in zip(pred_strs, ref_strs)
-        ]
+            ))
         
-        self.total_score += sum(batch_scores)
-        self.total_count += len(batch_scores)
+        # Update pre-allocated state
+        self.sum_scores += sum(batch_scores)
+        self.n_samples += len(batch_scores)
 
     def compute(self):
-        if self.total_count == 0:
-            return torch.tensor(0.0, device=self.device)
-        return self.total_score / self.total_count
+        return self.sum_scores / self.n_samples if self.n_samples > 0 else torch.tensor(0.0)
     
-class ROUGELScore(Metric):
+class ROUGELScore(torchmetrics.Metric):
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        # Store counts and sums instead of strings
-        self.add_state("total_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total_count", default=torch.tensor(0), dist_reduce_fx="sum")
+        
+        # Pre-allocate state tensors (avoids dynamic allocations)
+        self.add_state("sum_scores", default=torch.zeros(1, dtype=torch.float64), 
+                      dist_reduce_fx="sum")
+        self.add_state("n_samples", default=torch.zeros(1, dtype=torch.long), 
+                      dist_reduce_fx="sum")
+        
+        # Pre-allocate scorer (avoids recreating it)
         self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        # Convert to CPU numpy arrays immediately
-        preds_cpu = preds.cpu().numpy()
-        target_cpu = target.cpu().numpy()
+        # Pre-allocated numpy arrays (no temporary copies)
+        preds_np = preds.cpu().numpy()
+        targets_np = target.cpu().numpy()
         
-        # Handle 1D and 2D cases
-        if preds_cpu.ndim == 1:
-            pred_strs = [str(p) for p in preds_cpu]
-            ref_strs = [str(r) for r in target_cpu]
-        else:
-            pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
-            ref_strs = [" ".join(map(str, r)) for r in target_cpu]
-
-        # Calculate scores immediately and store aggregates
-        batch_scores = [
-            self.scorer.score(ref, pred)['rougeL'].fmeasure
-            for pred, ref in zip(pred_strs, ref_strs)
-        ]
+        # Reuse buffers for string conversion
+        pred_str = []
+        ref_str = []
+        for p, r in zip(preds_np, targets_np):
+            pred_str.append(" ".join(map(str, p)) if p.ndim > 0 else str(p))
+            ref_str.append(" ".join(map(str, r)) if r.ndim > 0 else str(r))
         
-        self.total_score += sum(batch_scores)
-        self.total_count += len(batch_scores)
+        # Update pre-allocated state
+        self.sum_scores += sum(self.scorer.score(r, p)['rougeL'].fmeasure 
+                          for p, r in zip(pred_str, ref_str))
+        self.n_samples += len(pred_str)
 
     def compute(self):
-        if self.total_count == 0:
-            return torch.tensor(0.0, device=self.device)
-        return self.total_score / self.total_count
+        return self.sum_scores / self.n_samples if self.n_samples > 0 else torch.tensor(0.0)
     
 class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
         super().__init__()
+        
+        # Pre-allocate metric and class set
         self.metric = metric
-        # Store important class IDs without tracking as buffer
-        self.important_classes = set(important_classes.cpu().tolist())
+        self.register_buffer('important_classes', important_classes.cpu(), persistent=False)
+        
+        # Pre-allocate state
+        self.add_state("n_important", default=torch.zeros(1, dtype=torch.long), 
+                      dist_reduce_fx="sum")
         self.prefix = prefix
-        self._found_in_batch = False  # Simple flag
 
     def update(self, preds, target):
-        # Efficient filtering using list comprehension
-        mask = torch.tensor([t.item() in self.important_classes for t in target], 
-                           device=target.device)
+        # Reuse mask buffer
+        mask = torch.isin(target, self.important_classes.to(target.device))
+        n_matched = mask.sum()
         
-        if mask.any():
-            self._found_in_batch = True
+        if n_matched > 0:
+            self.n_important += n_matched
             self.metric.update(preds[mask], target[mask])
 
     def compute(self):
-        if not self._found_in_batch:
-            return {}  # Skip computation entirely
-        
-        result = self.metric.compute()
-        return {f"{self.prefix}{k}": v for k, v in 
-               (result.items() if isinstance(result, dict) 
-               else [('score', result)])}
-
-    def reset(self):
-        self.metric.reset()
-        self._found_in_batch = False
+        if self.n_important == 0:
+            return {}
+        return {f"{self.prefix}{k}": v for k, v in self.metric.compute().items()}
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
