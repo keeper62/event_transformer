@@ -115,33 +115,6 @@ class ROUGELScore(torchmetrics.Metric):
 
     def compute(self):
         return self.sum_scores / self.n_samples if self.n_samples > 0 else torch.tensor(0.0)
-    
-class ImportantClassWrapper(torchmetrics.Metric):
-    def __init__(self, metric, important_classes, prefix='val/important_'):
-        super().__init__()
-        
-        # Pre-allocate metric and class set
-        self.metric = metric
-        self.register_buffer('important_classes', important_classes.cpu(), persistent=False)
-        
-        # Pre-allocate state
-        self.add_state("n_important", default=torch.zeros(1, dtype=torch.long), 
-                      dist_reduce_fx="sum")
-        self.prefix = prefix
-
-    def update(self, preds, target):
-        # Reuse mask buffer
-        mask = torch.isin(target, self.important_classes.to(target.device))
-        n_matched = mask.sum()
-        
-        if n_matched > 0:
-            self.n_important += n_matched
-            self.metric.update(preds[mask], target[mask])
-
-    def compute(self):
-        if self.n_important == 0:
-            return {}
-        return {f"{self.prefix}{k}": v for k, v in self.metric.compute().items()}
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -545,18 +518,6 @@ class TransformerLightning(pl.LightningModule):
         # New metrics
         self.val_bleu = BLEUScore(max_n=4)  # Average of BLEU-1 to BLEU-4
         self.val_rouge = ROUGELScore()
-        
-        # Important classes (keep original multi-class behavior)
-        if self.important_classes is not None:
-            self.val_important = ImportantClassWrapper(
-                torchmetrics.F1Score(
-                    task='multiclass',
-                    num_classes=self.num_classes,
-                    average='weighted'
-                ),
-                important_classes=self.important_classes,
-                prefix='val/important_'
-            )
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -597,8 +558,6 @@ class TransformerLightning(pl.LightningModule):
         self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
         self.val_rouge.update(preds, targets)
         
-        if hasattr(self, 'val_important'):
-            self.val_important.update(preds, targets)
         
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
@@ -621,21 +580,6 @@ class TransformerLightning(pl.LightningModule):
                     self._logger.warning(f"Failed to compute {metric_name}: {str(e)}")
                     metrics[metric_name] = float('nan')
             
-            # Handle important classes if they exist and have data
-            if hasattr(self, 'val_important'):
-                try:
-                    important_metrics = self.val_important.compute()
-                    if important_metrics:  # Only update if not empty
-                        if isinstance(important_metrics, dict):
-                            metrics.update({
-                                f"val/important_{k}": v 
-                                for k, v in important_metrics.items()
-                            })
-                        else:
-                            metrics['val/important_f1'] = important_metrics
-                except Exception as e:
-                    self._logger.warning(f"Failed to compute important metrics: {str(e)}")
-            
             # Only log if we have valid metrics
             if metrics:
                 self.log_dict({k: v for k, v in metrics.items() if v is not None}, prog_bar=False, sync_dist=True)
@@ -648,9 +592,7 @@ class TransformerLightning(pl.LightningModule):
             self.val_top5.reset()
             self.val_bleu.reset()
             self.val_rouge.reset()
-            
-            if hasattr(self, 'val_important'):
-                self.val_important.reset()
+        
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
