@@ -647,7 +647,7 @@ class TransformerLightning(pl.LightningModule):
             
             # Only log if we have valid metrics
             if metrics:
-                self.log_dict(metrics, prog_bar=False, sync_dist=True)
+                self.log_dict({k: v for k, v in metrics.items() if v is not None}, prog_bar=False, sync_dist=True)
             else:
                 self._logger.warning("No valid metrics to log in validation epoch")
                 
