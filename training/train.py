@@ -73,9 +73,14 @@ class BLEUScore(Metric):
         from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
         smoother = SmoothingFunction().method1
         
-        # Move all tensors to CPU at once for efficiency
-        preds_cpu = torch.cat(self.predictions).cpu().numpy()
-        refs_cpu = torch.cat(self.references).cpu().numpy()
+        # Case 1: Only one update → extract the single tensor directly
+        if len(self.predictions) == 1:
+            preds_cpu = self.predictions[0].cpu().numpy()
+            refs_cpu = self.references[0].cpu().numpy()
+        # Case 2: Multiple updates → concatenate first
+        else:
+            preds_cpu = torch.cat(self.predictions).cpu().numpy()
+            refs_cpu = torch.cat(self.references).cpu().numpy()
         
         total = 0.0
         for pred, ref in zip(preds_cpu, refs_cpu):
@@ -113,8 +118,14 @@ class ROUGELScore(Metric):
         if not self.predictions:
             return torch.tensor(0.0, device=self.device)
 
-        preds_cpu = torch.cat(self.predictions).cpu().numpy()
-        refs_cpu = torch.cat(self.references).cpu().numpy()
+        # Case 1: Only one update → extract the single tensor directly
+        if len(self.predictions) == 1:
+            preds_cpu = self.predictions[0].cpu().numpy()
+            refs_cpu = self.references[0].cpu().numpy()
+        # Case 2: Multiple updates → concatenate first
+        else:
+            preds_cpu = torch.cat(self.predictions).cpu().numpy()
+            refs_cpu = torch.cat(self.references).cpu().numpy()
 
         if preds_cpu.ndim == 1:
             pred_strs = [str(p) for p in preds_cpu]
@@ -622,7 +633,7 @@ class TransformerLightning(pl.LightningModule):
         metrics = {
             'val/acc': self.val_acc.compute(),
             'val/top5_acc': self.val_top5.compute(),
-            'val/bleu': self.val_bleu.compute(),  # Average BLEU-1 to BLEU-4
+            'val/bleu': self.val_bleu.compute(), 
             'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
         }
            

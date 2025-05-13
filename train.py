@@ -13,9 +13,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
-import socket
-import random
-
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
@@ -126,7 +123,7 @@ def train_with_config(
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp_find_unused_parameters_true' if num_accelerators > 1 else 'auto',
+            strategy='ddp' if num_accelerators > 1 else 'auto',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
             gradient_clip_val=config['training'].get('gradient_clip_val', None),
