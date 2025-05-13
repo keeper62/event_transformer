@@ -13,8 +13,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from models import load_config
 from training import DataModule, TransformerLightning
 
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '3'  
-
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
     logger = logging.getLogger(name or __name__)

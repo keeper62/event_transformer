@@ -22,7 +22,6 @@ import logging
 from rouge_score import rouge_scorer
 
 logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)  
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
@@ -73,14 +72,21 @@ class BLEUScore(Metric):
         from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
         smoother = SmoothingFunction().method1
         
-        # Case 1: Only one update → extract the single tensor directly
-        if len(self.predictions) == 1:
-            preds_cpu = self.predictions[0].cpu().numpy()
-            refs_cpu = self.references[0].cpu().numpy()
-        # Case 2: Multiple updates → concatenate first
+        if not self.predictions:
+            return torch.tensor(0.0, device=self.device)
+
+        # Handle case where predictions is already a tensor (multi-GPU)
+        if isinstance(self.predictions, torch.Tensor):
+            preds_cpu = self.predictions.cpu().numpy()
+            refs_cpu = self.references.cpu().numpy()
+        # Handle case where predictions is a list (single-GPU)
         else:
-            preds_cpu = torch.cat(self.predictions).cpu().numpy()
-            refs_cpu = torch.cat(self.references).cpu().numpy()
+            if len(self.predictions) == 1:
+                preds_cpu = self.predictions[0].cpu().numpy()
+                refs_cpu = self.references[0].cpu().numpy()
+            else:
+                preds_cpu = torch.cat(self.predictions).cpu().numpy()
+                refs_cpu = torch.cat(self.references).cpu().numpy()
         
         total = 0.0
         for pred, ref in zip(preds_cpu, refs_cpu):
@@ -118,14 +124,18 @@ class ROUGELScore(Metric):
         if not self.predictions:
             return torch.tensor(0.0, device=self.device)
 
-        # Case 1: Only one update → extract the single tensor directly
-        if len(self.predictions) == 1:
-            preds_cpu = self.predictions[0].cpu().numpy()
-            refs_cpu = self.references[0].cpu().numpy()
-        # Case 2: Multiple updates → concatenate first
+        # Handle case where predictions is already a tensor (multi-GPU)
+        if isinstance(self.predictions, torch.Tensor):
+            preds_cpu = self.predictions.cpu().numpy()
+            refs_cpu = self.references.cpu().numpy()
+        # Handle case where predictions is a list (single-GPU)
         else:
-            preds_cpu = torch.cat(self.predictions).cpu().numpy()
-            refs_cpu = torch.cat(self.references).cpu().numpy()
+            if len(self.predictions) == 1:
+                preds_cpu = self.predictions[0].cpu().numpy()
+                refs_cpu = self.references[0].cpu().numpy()
+            else:
+                preds_cpu = torch.cat(self.predictions).cpu().numpy()
+                refs_cpu = torch.cat(self.references).cpu().numpy()
 
         if preds_cpu.ndim == 1:
             pred_strs = [str(p) for p in preds_cpu]
