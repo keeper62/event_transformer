@@ -19,6 +19,8 @@ import os
 
 import logging
 
+from rouge_score import rouge_scorer
+
 logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
 
@@ -92,57 +94,41 @@ class BLEUScore(Metric):
         return torch.tensor(total / len(preds_cpu), device=self.device)
 
 class ROUGELScore(Metric):
-    """GPU-compatible ROUGE-L metric with batch processing"""
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.rouge = evaluate.load('rouge')
         self.add_state("predictions", default=[], dist_reduce_fx="cat")
         self.add_state("references", default=[], dist_reduce_fx="cat")
+        self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """Store batch tensors (GPU-compatible)"""
-        # Ensure we're working with sequences (2D tensors)
         if preds.ndim == 1:
             preds = preds.unsqueeze(-1)
         if target.ndim == 1:
             target = target.unsqueeze(-1)
-            
+
         self.predictions.append(preds.detach().clone())
         self.references.append(target.detach().clone())
 
     def compute(self):
-        """Batch process ROUGE-L on CPU"""
         if not self.predictions:
             return torch.tensor(0.0, device=self.device)
-            
-        # Concatenate all batches and move to CPU once
+
         preds_cpu = torch.cat(self.predictions).cpu().numpy()
         refs_cpu = torch.cat(self.references).cpu().numpy()
-        
-        # Convert to strings - handling both sequences and single tokens
+
         if preds_cpu.ndim == 1:
             pred_strs = [str(p) for p in preds_cpu]
             ref_strs = [str(r) for r in refs_cpu]
         else:
             pred_strs = [" ".join(map(str, p)) for p in preds_cpu]
             ref_strs = [" ".join(map(str, r)) for r in refs_cpu]
-        
-        # Batch compute ROUGE
-        results = self.rouge.compute(
-            predictions=pred_strs,
-            references=ref_strs,
-            rouge_types=['rougeL']
-        )
-        
-        # Handle different output formats from evaluate library
-        if isinstance(results['rougeL'], dict):
-            # Old format: {'rougeL': {'mid': {'fmeasure': float}}}
-            rouge_score = results['rougeL']['mid']['fmeasure']
-        else:
-            # New format: {'rougeL': float}
-            rouge_score = results['rougeL']
-        
-        return torch.tensor(rouge_score, device=self.device)
+
+        scores = [
+            self.scorer.score(ref, pred)['rougeL'].fmeasure
+            for pred, ref in zip(pred_strs, ref_strs)
+        ]
+
+        return torch.tensor(sum(scores) / len(scores), device=self.device)
 
 class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
