@@ -21,7 +21,7 @@ import logging
 
 from rouge_score import rouge_scorer
 
-logging.getLogger("lightning.pytorch").setLevel(logging.DEBUG)  
+logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
 
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
@@ -32,7 +32,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.propagate = False  # Critical for PL compatibility
     
     if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only    
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
         
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
@@ -40,7 +40,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.DEBUG)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -125,28 +125,32 @@ class ImportantClassWrapper(torchmetrics.Metric):
     def __init__(self, metric, important_classes, prefix='val/important_'):
         super().__init__()
         self.metric = metric
-        self.important_classes = important_classes.to('cpu')  # Store on CPU
+        # Store important class IDs without tracking as buffer
+        self.important_classes = set(important_classes.cpu().tolist())
         self.prefix = prefix
+        self._found_in_batch = False  # Simple flag
 
     def update(self, preds, target):
-        # Move important_classes to target device
-        important_classes = self.important_classes.to(target.device)
-        
-        # Create mask safely
-        mask = torch.zeros_like(target, dtype=torch.bool)
-        for cls in important_classes:
-            mask = mask | (target == cls)
+        # Efficient filtering using list comprehension
+        mask = torch.tensor([t.item() in self.important_classes for t in target], 
+                           device=target.device)
         
         if mask.any():
-            # Ensure preds and target are on same device
-            preds = preds.to(target.device)
+            self._found_in_batch = True
             self.metric.update(preds[mask], target[mask])
 
     def compute(self):
+        if not self._found_in_batch:
+            return {}  # Skip computation entirely
+        
         result = self.metric.compute()
-        if isinstance(result, dict):
-            return {f"{self.prefix}{k}": v for k, v in result.items()}
-        return {f"{self.prefix}score": result}
+        return {f"{self.prefix}{k}": v for k, v in 
+               (result.items() if isinstance(result, dict) 
+               else [('score', result)])}
+
+    def reset(self):
+        self.metric.reset()
+        self._found_in_batch = False
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -603,41 +607,59 @@ class TransformerLightning(pl.LightningModule):
         self.val_rouge.update(preds, targets)
         
         if hasattr(self, 'val_important'):
-            self.val_important(preds, targets)
+            self.val_important.update(preds, targets)
         
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def on_validation_epoch_end(self):
-        # Log all metrics
-        metrics = {
-            'val/acc': self.val_acc.compute(),
-            'val/top5_acc': self.val_top5.compute(),
-            'val/bleu': self.val_bleu.compute(), 
-            'val/rougeL': self.val_rouge.compute(),  # ROUGE-L F1 score
-        }
-           
-        # Handle important classes
-        if hasattr(self, 'val_important'):
-            important_metrics = self.val_important.compute()
-            if isinstance(important_metrics, dict):
-                metrics.update({
-                    f"val/important_{k}": v 
-                    for k, v in important_metrics.items()
-                })
+        try:
+            # Log all metrics with error handling
+            metrics = {}
+            
+            # Standard metrics
+            for metric_name, metric in [
+                ('val/acc', self.val_acc),
+                ('val/top5_acc', self.val_top5),
+                ('val/bleu', self.val_bleu),
+                ('val/rougeL', self.val_rouge)
+            ]:
+                try:
+                    metrics[metric_name] = metric.compute()
+                except Exception as e:
+                    self._logger.warning(f"Failed to compute {metric_name}: {str(e)}")
+                    metrics[metric_name] = float('nan')
+            
+            # Handle important classes if they exist and have data
+            if hasattr(self, 'val_important'):
+                try:
+                    important_metrics = self.val_important.compute()
+                    if important_metrics:  # Only update if not empty
+                        if isinstance(important_metrics, dict):
+                            metrics.update({
+                                f"val/important_{k}": v 
+                                for k, v in important_metrics.items()
+                            })
+                        else:
+                            metrics['val/important_f1'] = important_metrics
+                except Exception as e:
+                    self._logger.warning(f"Failed to compute important metrics: {str(e)}")
+            
+            # Only log if we have valid metrics
+            if metrics:
+                self.log_dict(metrics, prog_bar=False, sync_dist=True)
             else:
-                metrics['val/important_f1'] = important_metrics
-        
-        self.log_dict(metrics, prog_bar=False, sync_dist=True)
-        
-        # Reset all metrics
-        self.val_acc.reset()
-        self.val_top5.reset()
-        self.val_bleu.reset()
-        self.val_rouge.reset()
-        
-        if hasattr(self, 'val_important'):
-            self.val_important.reset()
+                self._logger.warning("No valid metrics to log in validation epoch")
+                
+        finally:
+            # Always reset metrics, even if computation failed
+            self.val_acc.reset()
+            self.val_top5.reset()
+            self.val_bleu.reset()
+            self.val_rouge.reset()
+            
+            if hasattr(self, 'val_important'):
+                self.val_important.reset()
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
