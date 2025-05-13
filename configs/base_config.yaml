@@ -6,26 +6,26 @@ base_config:
     # Model Hyperparameters
     model:
         vocab_size:
-        embed_dim: 128
+        embed_dim: 512
         num_heads: 8
         num_layers: 6
-        ffn_dim: 256
-        num_windows: 32          # Sliding window size for multi-head attention
-        max_len: 256
-        context_length: 256      # The # steps in the past as input
+        ffn_dim: 2048
+        num_windows: 64          # Sliding window size for multi-head attention
+        max_len: 512
+        context_length: 256            # The # steps in the past as input
         prediction_steps: 32      # The # steps in the future to predict
         num_groups: 6
         dropout: 0.1
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
-        # Bias specific
-        bias_injection: "attention"  # Options: "attention", "ffn"
+        # Bias specific which are the sentence meanings
+        bias_injection: null        # Options: "attention", "ffn", null
         bias_scale: 0.1              # Float multiplier for the bias strength
 
     # Training Parameters
     training:
-        num_epochs: 10
-        batch_size: 8
+        num_epochs: 32
+        batch_size: 128
         learning_rate: 0.001
         weight_decay: 0.01       # L2 regularization
         log_interval: 50         # Log every N steps
@@ -88,7 +88,7 @@ base_config:
     # Logging
     logging:
         log_dir: "logs/"          # Directory for TensorBoard logs
-        experiment_name: "xc40_experiment"
+        experiment_name: "xc40_base"
         version: "version_0"      # Optional version tag
         log_graph: true           # Whether to log model graph
         log_attention: false      # Whether to log attention weights (memory intensive)

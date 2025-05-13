@@ -1,26 +1,24 @@
-base_config:
     # Environment settings
     device: "auto"  # Can be "auto", "cpu", "cuda", etc.
     seed: 42        # Random seed for reproducibility
 
     # Model Hyperparameters
     model:
-        vocab_size: 1825
+        vocab_size:
         embed_dim: 512
         num_heads: 8
         num_layers: 6
         ffn_dim: 2048
         num_windows: 64          # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 256      # The # steps in the past as input
-        prediction_steps: 64      # The # steps in the future to predict
-        num_groups: 8
+        context_length: 256            # The # steps in the past as input
+        prediction_steps: 32      # The # steps in the future to predict
+        num_groups: 6
         dropout: 0.1
-        meaning_vocab_size: 1825 # Vocabulary size for the meaning embedding
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
-        # Bias specific
-        bias_injection: "attention"  # Options: "attention", "ffn"
+        # Bias specific which are the sentence meanings
+        bias_injection: "attention"        # Options: "attention", "ffn", null
         bias_scale: 0.1              # Float multiplier for the bias strength
 
     # Training Parameters
@@ -29,12 +27,11 @@ base_config:
         batch_size: 128
         learning_rate: 0.001
         weight_decay: 0.01       # L2 regularization
-        gradient_clip_val: 1.0   # Gradient clipping value
         log_interval: 50         # Log every N steps
         overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
         
-        # FeedForward Network specific
-        ffn_pre_norm: true       # Whether to use LayerNorm before FFN
+       
+        pre_norm: false       # Whether to use LayerNorm before FFN
         residual_scaling: 1.0    # Scale factor for residual connections
         
         # Checkpointing
@@ -60,13 +57,13 @@ base_config:
         qkv_bias: false          # Whether to use bias in QKV projections
         out_bias: true           # Whether to use bias in output projection
         memory_efficient: true   # Use memory-efficient attention
-        chunk_size: 256          # Sequence chunk size for memory efficiency
-        inter_head_dim: 64       # Intermediate dimension for head collaboration
+        chunk_size: 32          # Sequence chunk size for memory efficiency
+        inter_head_dim: 128       # Intermediate dimension for head collaboration
         attention_dropout: 0.1   # Dropout for attention weights
-    
+
     # Positional Encoding
     position:
-        ape_class: "PositionalEncoding"  # Options: PositionalEncoding, LearnableAbsolutePosition
+        ape_class: false  # Options: PositionalEncoding, LearnableAbsolutePosition
         max_len: 64
         dropout: 0.1
 
@@ -90,7 +87,7 @@ base_config:
     # Logging
     logging:
         log_dir: "logs/"          # Directory for TensorBoard logs
-        experiment_name: "xc40_experiment"
+        experiment_name: "xc40_base"
         version: "version_0"      # Optional version tag
         log_graph: true           # Whether to log model graph
         log_attention: false      # Whether to log attention weights (memory intensive)
