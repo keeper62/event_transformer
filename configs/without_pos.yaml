@@ -1,3 +1,4 @@
+base_config:    
     # Environment settings
     device: "auto"  # Can be "auto", "cpu", "cuda", etc.
     seed: 42        # Random seed for reproducibility
