@@ -51,7 +51,15 @@ class TransformerDecoderLayer(nn.Module):
         self.attn_dropout = nn.Dropout(self.model_cfg.get('attn_dropout', 0.1))
         self.ffn_dropout = nn.Dropout(self.model_cfg.get('ffn_dropout', 0.1))
         
-        self.residual_scaling = config['training'].get('residual_scaling', 1.0)
+        # Register as trainable parameters
+        self.residual_scaling = nn.Parameter(
+            torch.tensor(config['training'].get('residual_scaling', 1.0))
+        )
+        
+        # If you want bias_scale to be trainable per layer
+        self.bias_scale = nn.Parameter(
+            torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
+        )
 
     def _forward_sublayer(
         self,
@@ -71,14 +79,14 @@ class TransformerDecoderLayer(nn.Module):
         x_out = sublayer_fn(x, attention_mask)
         
         if bias is not None:
-            x_out = x_out + self.model_cfg['bias_scale'] * bias
+            x_out = x_out + self.bias_scale * bias
             
         x_out = dropout(x_out)
         
         if not self.pre_norm:
             x_out = norm(x_out)
             
-        return residual_connection + (x_out * self.residual_scaling)
+        return residual_connection + (x_out * torch.sigmoid(self.residual_scaling)) # to set between 0-1
 
     def _forward_impl(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         if self.model_cfg['bias_injection'] is not None:
