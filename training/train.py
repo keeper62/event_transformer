@@ -568,9 +568,10 @@ class TransformerLightning(pl.LightningModule):
         self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
     
-        # Convert to text format for BLEU/ROUGE
-        preds_text = self._convert_to_text_format(preds)
-        targets_text = self._convert_to_text_format(targets)
+        with torch.no_grad():
+            # Convert to text format for BLEU/ROUGE
+            preds_text = self._convert_to_text_format(preds)
+            targets_text = self._convert_to_text_format(targets)
         
         # Update sequence metrics
         self.val_bleu.update(preds_text, targets_text)
