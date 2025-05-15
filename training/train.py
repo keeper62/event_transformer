@@ -9,17 +9,14 @@ import torch
 import pytorch_lightning as pl
 
 
-from torchmetrics import Metric
+from torchmetrics.text import BLEUScore, ROUGEScore
 import torch.nn as nn
 import torch.nn.functional as F
-
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 import os
 
 import logging
 
-from rouge_score import rouge_scorer
 
 logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
 
@@ -45,76 +42,6 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         logger.addHandler(handler)
     
     return logger
-
-class BLEUScore(torchmetrics.Metric):
-    def __init__(self, max_n=4, weights=None, dist_sync_on_step=False):
-        super().__init__(dist_sync_on_step=dist_sync_on_step)
-        
-        # Pre-allocate state
-        self.add_state("sum_scores", default=torch.zeros(1, dtype=torch.float64),
-                      dist_reduce_fx="sum")
-        self.add_state("n_samples", default=torch.zeros(1, dtype=torch.long),
-                      dist_reduce_fx="sum")
-        
-        # Pre-compute weights
-        self.weights = weights or [1.0/max_n] * max_n
-        self.smoother = SmoothingFunction().method1
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        preds_np = preds.cpu().numpy()
-        targets_np = target.cpu().numpy()
-        
-        # Reuse buffers for token storage
-        batch_scores = []
-        for p, r in zip(preds_np, targets_np):
-            pred_tokens = [str(x) for x in (p if p.ndim > 0 else [p])]
-            ref_tokens = [[str(x) for x in (r if r.ndim > 0 else [r])]]
-            
-            batch_scores.append(sentence_bleu(
-                ref_tokens, pred_tokens,
-                weights=self.weights,
-                smoothing_function=self.smoother
-            ))
-        
-        # Update pre-allocated state
-        self.sum_scores += sum(batch_scores)
-        self.n_samples += len(batch_scores)
-
-    def compute(self):
-        return self.sum_scores / self.n_samples if self.n_samples > 0 else torch.tensor(0.0)
-    
-class ROUGELScore(torchmetrics.Metric):
-    def __init__(self, dist_sync_on_step=False):
-        super().__init__(dist_sync_on_step=dist_sync_on_step)
-        
-        # Pre-allocate state tensors (avoids dynamic allocations)
-        self.add_state("sum_scores", default=torch.zeros(1, dtype=torch.float64), 
-                      dist_reduce_fx="sum")
-        self.add_state("n_samples", default=torch.zeros(1, dtype=torch.long), 
-                      dist_reduce_fx="sum")
-        
-        # Pre-allocate scorer (avoids recreating it)
-        self.scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        # Pre-allocated numpy arrays (no temporary copies)
-        preds_np = preds.cpu().numpy()
-        targets_np = target.cpu().numpy()
-        
-        # Reuse buffers for string conversion
-        pred_str = []
-        ref_str = []
-        for p, r in zip(preds_np, targets_np):
-            pred_str.append(" ".join(map(str, p)) if p.ndim > 0 else str(p))
-            ref_str.append(" ".join(map(str, r)) if r.ndim > 0 else str(r))
-        
-        # Update pre-allocated state
-        self.sum_scores += sum(self.scorer.score(r, p)['rougeL'].fmeasure 
-                          for p, r in zip(pred_str, ref_str))
-        self.n_samples += len(pred_str)
-
-    def compute(self):
-        return self.sum_scores / self.n_samples if self.n_samples > 0 else torch.tensor(0.0)
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -521,8 +448,8 @@ class TransformerLightning(pl.LightningModule):
         )
         
         # Sequence metrics - Updated to use torchmetrics implementations
-        self.val_bleu = torchmetrics.text.BLEUScore(n_gram=4)  # BLEU-1 to BLEU-4
-        self.val_rouge = torchmetrics.text.ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False)
+        self.val_bleu = BLEUScore(n_gram=4)  # BLEU-1 to BLEU-4
+        self.val_rouge = ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False)
         
     def _convert_to_text_format(self, tensor: torch.Tensor):
         """Convert event IDs tensor to string format expected by torchmetrics text metrics"""
@@ -563,25 +490,21 @@ class TransformerLightning(pl.LightningModule):
         loss = self.loss_fn(logits, targets)
         
         preds = logits.argmax(dim=-1)
-        
-        with torch.no_grad():
-            preds_cpu = preds.cpu()
-            targets_cpu = targets.cpu()
 
-            # Update accuracy metrics
-            self._logger.debug("Updating accuracy metrics")
-            self.val_acc.update(preds, targets)
-            self.val_top5.update(logits, targets)
+        # Update accuracy metrics
+        self._logger.debug("Updating accuracy metrics")
+        self.val_acc.update(preds, targets)
+        self.val_top5.update(logits, targets)
 
-            # Convert to text format for BLEU/ROUGE
-            self._logger.debug("Convert to text format for BLEU/ROUGE")
-            preds_text = self._convert_to_text_format(preds_cpu)
-            targets_text = self._convert_to_text_format(targets_cpu)
+        # Convert to text format for BLEU/ROUGE
+        self._logger.debug("Convert to text format for BLEU/ROUGE")
+        preds_text = self._convert_to_text_format(preds)
+        targets_text = self._convert_to_text_format(targets)
 
-            # Update sequence metrics
-            self._logger.debug("Updating sequence metrics")
-            self.val_bleu.update(preds_text, targets_text)
-            self.val_rouge.update(preds_text, targets_text)
+        # Update sequence metrics
+        self._logger.debug("Updating sequence metrics")
+        self.val_bleu.update(preds_text, targets_text)
+        self.val_rouge.update(preds_text, targets_text)
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self._logger.debug("Validation step finished!")
