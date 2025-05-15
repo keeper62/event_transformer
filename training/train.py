@@ -527,9 +527,11 @@ class TransformerLightning(pl.LightningModule):
     def _convert_to_text_format(self, tensor: torch.Tensor):
         """Convert event IDs tensor to string format expected by torchmetrics text metrics"""
         # tensor shape: [batch_size, seq_len] or [batch_size * seq_len]
-        if tensor.dim() > 1:
+        if tensor.dim() == 1:
+            return [" ".join(map(str, tensor.tolist()))]  # single sequence as one string
+        else:
             tensor = tensor.view(-1, self.seq_len)
-        return [" ".join(map(str, seq.tolist())) for seq in tensor]
+            return [" ".join(map(str, seq.tolist())) for seq in tensor]
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -565,27 +567,15 @@ class TransformerLightning(pl.LightningModule):
         # Update accuracy metrics
         self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
+    
+        # Convert to text format for BLEU/ROUGE
+        preds_text = self._convert_to_text_format(preds)
+        targets_text = self._convert_to_text_format(targets)
         
-        # Calculate complete sequences
-        total_elements = (targets.shape[0] // self.seq_len) * self.seq_len
-        actual_batch_size = targets.shape[0] // self.seq_len
-        
-        # Only process sequence metrics if we have complete sequences
-        if total_elements > 0 and actual_batch_size > 0:
-            # Reshape to [batch_size, seq_len] for sequence metrics
-            preds_seq = preds[:total_elements].view(actual_batch_size, self.seq_len)
-            targets_seq = targets[:total_elements].view(actual_batch_size, self.seq_len)
-            
-            # Convert to text format for BLEU/ROUGE
-            preds_text = self._convert_to_text_format(preds_seq)
-            targets_text = self._convert_to_text_format(targets_seq)
-            
-            # Update sequence metrics
-            self.val_bleu.update(preds_text, targets_text)
-            self.val_rouge.update(preds_text, targets_text)
-        elif not self.trainer.sanity_checking:  # Skip warning during sanity check
-            self._logger.debug(f"Skipping sequence metrics - incomplete batch: {targets.shape[0]} elements (needed multiples of {self.seq_len})")
-        
+        # Update sequence metrics
+        self.val_bleu.update(preds_text, targets_text)
+        self.val_rouge.update(preds_text, targets_text)
+
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
