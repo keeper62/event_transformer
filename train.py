@@ -133,8 +133,7 @@ def train_with_config(
             enable_progress_bar=int(os.getenv("LOCAL_RANK", 0)) == 0,
             precision='16-mixed',
             accumulate_grad_batches=4,
-            sync_batchnorm=torch.cuda.is_available(),
-            enable_model_validation_sync=False
+            sync_batchnorm=torch.cuda.is_available()
         )
 
         logger.info(f"Starting training with config: {config_name}")
