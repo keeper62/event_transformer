@@ -132,7 +132,8 @@ def train_with_config(
             overfit_batches=config['training'].get('overfit_batches', 0),
             enable_progress_bar=int(os.getenv("LOCAL_RANK", 0)) == 0,
             precision='16-mixed',
-            accumulate_grad_batches=4
+            accumulate_grad_batches=4,
+            sync_batchnorm=torch.cuda.is_available(),
         )
 
         logger.info(f"Starting training with config: {config_name}")
