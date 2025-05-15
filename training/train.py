@@ -32,7 +32,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     logger.propagate = False  # Critical for PL compatibility
     
     if int(os.environ.get("LOCAL_RANK", "0")) == 0:  # Main process only    
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
@@ -40,7 +40,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         )
         
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     
@@ -593,14 +593,17 @@ class TransformerLightning(pl.LightningModule):
             return
         
         # Compute metrics separately
+        self._logger.debug("Computing accuracy metrics")
         acc = self.val_acc.compute()
         top5 = self.val_top5.compute()
         
         # Handle sequence metrics safely
+        self._logger.debug("Computing sequence metrics")
         bleu = self.val_bleu.compute() 
         rouge = self.val_rouge.compute()['rougeL_fmeasure']
         
-        # Log without sync
+        # Log 
+        self._logger.debug("Logging metrics")
         self.log_dict({
             'val/acc': acc,
             'val/top5': top5,
@@ -609,6 +612,7 @@ class TransformerLightning(pl.LightningModule):
         }, sync_dist=True)  # Critical change
         
         # Reset metrics
+        self._logger.debug("Resetting metrics")
         self.val_acc.reset()
         self.val_top5.reset()
         self.val_bleu.reset()
