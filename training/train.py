@@ -8,8 +8,6 @@ from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
 
-
-from torchmetrics.text import BLEUScore, ROUGEScore
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -17,6 +15,7 @@ import os
 
 import logging
 
+import numpy as np
 
 logging.getLogger("lightning.pytorch").setLevel(logging.INFO)  
 
@@ -42,6 +41,82 @@ def setup_logger(name: str | None = None) -> logging.Logger:
         logger.addHandler(handler)
     
     return logger
+
+class LightningNGramScore(torchmetrics.Metric):
+    def __init__(self, ngram_size=4):
+        super().__init__()
+        self.ngram_size = ngram_size
+        
+        # Lightning-managed states
+        self.add_state("match_counts", default=torch.zeros(ngram_size), dist_reduce_fx="sum")
+        self.add_state("total_counts", default=torch.zeros(ngram_size), dist_reduce_fx="sum")
+    
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        # Ensure 2D input
+        if preds.dim() == 1:
+            preds = preds.unsqueeze(0)
+            targets = targets.unsqueeze(0)
+            
+        for n in range(1, self.ngram_size + 1):
+            # Extract n-grams using unfold
+            pred_ngrams = preds.unfold(1, n, 1)   # [batch, ngram_windows, n]
+            target_ngrams = targets.unfold(1, n, 1)
+            
+            # Compare n-grams
+            matches = (pred_ngrams == target_ngrams).all(dim=-1)
+            self.match_counts[n-1] += matches.sum().float()
+            self.total_counts[n-1] += matches.numel()
+    
+    def compute(self):
+        precisions = self.match_counts / self.total_counts.clamp(min=1)
+        return torch.exp(torch.mean(torch.log(precisions)))
+
+class RougeL(torchmetrics.Metric):
+    def __init__(self):
+        super().__init__()
+        self.add_state("lcs_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("pred_len_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("target_len_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        """Update with 1D event ID sequences"""
+        # Input validation
+        if not (isinstance(preds, torch.Tensor) and isinstance(targets, torch.Tensor)):
+            raise TypeError("Inputs must be torch.Tensor")
+        if preds.dim() != 1 or targets.dim() != 1:
+            raise ValueError("Inputs must be 1D tensors")
+        
+        # Convert to numpy safely
+        preds_np = preds.cpu().numpy()
+        targets_np = targets.cpu().numpy()
+        
+        # Compute metrics
+        lcs_len = self._lcs_length(preds_np, targets_np)
+        self.lcs_sum += lcs_len
+        self.pred_len_sum += len(preds_np)
+        self.target_len_sum += len(targets_np)
+        self.total += 1
+
+    def _lcs_length(self, a: np.ndarray, b: np.ndarray) -> int:
+        """Compute LCS length for numpy arrays"""
+        if np.array_equal(a, b):
+            return len(a)
+        
+        dp = [[0]*(len(b)+1) for _ in range(len(a)+1)]
+        for i in range(1, len(a)+1):
+            for j in range(1, len(b)+1):
+                if a[i-1] == b[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        return dp[-1][-1]
+
+    def compute(self) -> torch.Tensor:
+        precision = self.lcs_sum / self.pred_len_sum.clamp(min=1e-6)
+        recall = self.lcs_sum / self.target_len_sum.clamp(min=1e-6)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
+        return torch.clamp(f1, 0, 1)  # Ensure between 0-1
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=None, reduction='mean'):
@@ -448,17 +523,8 @@ class TransformerLightning(pl.LightningModule):
         )
         
         # Sequence metrics - Updated to use torchmetrics implementations
-        self.val_bleu = BLEUScore(n_gram=4).cpu()  # BLEU-4
-        self.val_rouge = ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False).cpu()
-        
-    def _convert_to_text_format(self, tensor: torch.Tensor):
-        """Convert event IDs tensor to string format expected by torchmetrics text metrics"""
-        # tensor shape: [batch_size, seq_len] or [batch_size * seq_len]
-        if tensor.dim() == 1:
-            return [" ".join(map(str, tensor.tolist()))]  # single sequence as one string
-        else:
-            tensor = tensor.view(-1, self.seq_len)
-            return [" ".join(map(str, seq.tolist())) for seq in tensor]
+        self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
+        self.val_rouge = RougeL()
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -496,20 +562,10 @@ class TransformerLightning(pl.LightningModule):
         self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
 
-        with torch.no_grad():
-            # Move only necessary tensors to CPU
-            preds_cpu = preds.cpu()
-            targets_cpu = targets.cpu()
-            
-            # Convert to text format for BLEU/ROUGE
-            self._logger.debug("Convert to text format for BLEU/ROUGE")
-            preds_text = self._convert_to_text_format(preds_cpu)
-            targets_text = self._convert_to_text_format(targets_cpu)
-
-            self._logger.debug("Updating sequence metrics")
-            # Update CPU-based metrics
-            self.val_bleu.update(preds_text, targets_text)
-            self.val_rouge.update(preds_text, targets_text)
+        self._logger.debug("Updating sequence metrics")
+        # Update CPU-based metrics
+        self.val_bleu.update(preds, targets)
+        self.val_rouge.update(preds, targets)
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self._logger.debug("Validation step finished!")
@@ -523,11 +579,10 @@ class TransformerLightning(pl.LightningModule):
             'val/top5': self.val_top5.compute()
         }
 
-        # CPU metrics - no sync
-        with torch.no_grad():
-            metrics.update({
-                'val/bleu': self.val_bleu.compute(),
-                'val/rougeL': self.val_rouge.compute()['rougeL_fmeasure']
+
+        metrics.update({
+            'val/bleu': self.val_bleu.compute(),
+            'val/rougeL': self.val_rouge.compute()
         })
 
         # 3. Safe logging (no sync for text metrics)
@@ -541,32 +596,7 @@ class TransformerLightning(pl.LightningModule):
         self.log_dict({
             k: v for k, v in metrics.items() 
             if k in ['val/bleu', 'val/rougeL']
-        }, sync_dist=False)  # Never sync CPU metrics
-
-        self._logger.debug("Resetting metrics safely")
-        # 4. Atomic reset with device check
-        self._reset_metrics()
-        self._logger.debug("Reset succesful!")
-
-    def _reset_metrics(self):
-        """Reset with device safety"""
-        # GPU metrics
-        self.val_acc.reset()
-        self.val_top5.reset()
-
-        # CPU metrics
-        self.val_bleu.reset()
-        self.val_rouge.reset()
-        
-    def on_validation_start(self):
-        self._logger.debug(f"""
-        Device Report:
-        Model: {next(self.model.parameters()).device}
-        Accuracy: {self.val_acc.device}
-        BLEU: {self.val_bleu.device}
-        ROUGE: {self.val_rouge.device}
-        Trainer Strategy: {self.trainer.strategy.__class__.__name__}
-        """)    
+        }, sync_dist=True)  # Never sync CPU metrics
      
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
