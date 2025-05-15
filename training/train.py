@@ -588,52 +588,31 @@ class TransformerLightning(pl.LightningModule):
 
 
     def on_validation_epoch_end(self):
-        try:
-            # Log all metrics with error handling
-            metrics = {}
-            
-            # Standard metrics
-            for metric_name, metric in [
-                ('val/acc', self.val_acc),
-                ('val/top5_acc', self.val_top5)
-            ]:
-                try:
-                    metrics[metric_name] = metric.compute()
-                except Exception as e:
-                    self._logger.warning(f"Failed to compute {metric_name}: {str(e)}")
-                    metrics[metric_name] = float('nan')
-            
-            # Sequence metrics with special handling
-            try:
-                bleu_score = self.val_bleu.compute()
-                metrics['val/bleu'] = bleu_score
-            except Exception as e:
-                self._logger.warning(f"Failed to compute BLEU: {str(e)}")
-                metrics['val/bleu'] = float('nan')
-                
-            try:
-                rouge_scores = self.val_rouge.compute()
-                metrics['val/rougeL_f1'] = rouge_scores['rougeL_fmeasure']
-            except Exception as e:
-                self._logger.warning(f"Failed to compute ROUGE: {str(e)}")
-                metrics['val/rougeL_f1'] = float('nan')
-            
-            # Only log if we have valid metrics
-            if metrics:
-                self.log_dict(
-                    {k: v for k, v in metrics.items() if not torch.isnan(v) if v is not None},
-                    prog_bar=False,
-                    sync_dist=True
-                )
-            else:
-                self._logger.warning("No valid metrics to log in validation epoch")
-                
-        finally:
-            # Always reset metrics, even if computation failed
-            self.val_acc.reset()
-            self.val_top5.reset()
-            self.val_bleu.reset()
-            self.val_rouge.reset()
+        # Skip during sanity checking
+        if self.trainer.sanity_checking:
+            return
+        
+        # Compute metrics separately
+        acc = self.val_acc.compute()
+        top5 = self.val_top5.compute()
+        
+        # Handle sequence metrics safely
+        bleu = self.val_bleu.compute() 
+        rouge = self.val_rouge.compute()['rougeL_fmeasure']
+        
+        # Log without sync
+        self.log_dict({
+            'val/acc': acc,
+            'val/top5': top5,
+            'val/bleu': bleu,
+            'val/rougeL': rouge
+        }, sync_dist=False)  # Critical change
+        
+        # Reset metrics
+        self.val_acc.reset()
+        self.val_top5.reset()
+        self.val_bleu.reset()
+        self.val_rouge.reset()
         
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
