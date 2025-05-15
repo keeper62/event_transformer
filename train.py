@@ -134,6 +134,7 @@ def train_with_config(
             precision='16-mixed',
             accumulate_grad_batches=4,
             sync_batchnorm=torch.cuda.is_available(),
+            enable_model_validation_sync=False
         )
 
         logger.info(f"Starting training with config: {config_name}")

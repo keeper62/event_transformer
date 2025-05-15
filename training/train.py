@@ -448,8 +448,8 @@ class TransformerLightning(pl.LightningModule):
         )
         
         # Sequence metrics - Updated to use torchmetrics implementations
-        self.val_bleu = BLEUScore(n_gram=4)  # BLEU-1 to BLEU-4
-        self.val_rouge = ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False)
+        self.val_bleu = BLEUScore(n_gram=4).cpu()  # BLEU-4
+        self.val_rouge = ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False).cpu()
         
     def _convert_to_text_format(self, tensor: torch.Tensor):
         """Convert event IDs tensor to string format expected by torchmetrics text metrics"""
@@ -496,15 +496,20 @@ class TransformerLightning(pl.LightningModule):
         self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
 
-        # Convert to text format for BLEU/ROUGE
-        self._logger.debug("Convert to text format for BLEU/ROUGE")
-        preds_text = self._convert_to_text_format(preds)
-        targets_text = self._convert_to_text_format(targets)
+        with torch.no_grad():
+            # Move only necessary tensors to CPU
+            preds_cpu = preds.cpu()
+            targets_cpu = targets.cpu()
+            
+            # Convert to text format for BLEU/ROUGE
+            self._logger.debug("Convert to text format for BLEU/ROUGE")
+            preds_text = self._convert_to_text_format(preds_cpu)
+            targets_text = self._convert_to_text_format(targets_cpu)
 
-        # Update sequence metrics
-        self._logger.debug("Updating sequence metrics")
-        self.val_bleu.update(preds_text, targets_text)
-        self.val_rouge.update(preds_text, targets_text)
+            self._logger.debug("Updating sequence metrics")
+            # Update CPU-based metrics
+            self.val_bleu.update(preds_text, targets_text)
+            self.val_rouge.update(preds_text, targets_text)
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self._logger.debug("Validation step finished!")
@@ -513,65 +518,56 @@ class TransformerLightning(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         """Complete rewrite with guaranteed device safety"""
-        if self.trainer.sanity_checking:
-            return
+        metrics = {
+            'val/acc': self.val_acc.compute(),
+            'val/top5': self.val_top5.compute()
+        }
 
-        # 1. Compute metrics with explicit device management
-        metrics = {}
-        try:
-            # Standard metrics (GPU)
+        # CPU metrics - no sync
+        with torch.no_grad():
             metrics.update({
-                'val/acc': self.val_acc.compute(),
-                'val/top5': self.val_top5.compute()
-            })
-        except Exception as e:
-            self._logger.error(f"Accuracy metrics failed: {e}")
-            metrics.update({'val/acc': torch.nan, 'val/top5': torch.nan})
-
-        # 2. Text metrics (forced CPU)
-        try:
-            with torch.no_grad():
-                if self.val_bleu._update_called:
-                    metrics['val/bleu'] = self.val_bleu.compute().cpu()
-                if self.val_rouge._update_called:
-                    metrics['val/rougeL'] = self.val_rouge.compute()['rougeL_fmeasure'].cpu()
-        except Exception as e:
-            self._logger.error(f"Text metrics failed: {e}")
-            metrics.update({'val/bleu': torch.nan, 'val/rougeL': torch.nan})
+                'val/bleu': self.val_bleu.compute(),
+                'val/rougeL': self.val_rouge.compute()['rougeL_fmeasure']
+        })
 
         # 3. Safe logging (no sync for text metrics)
         self._logger.debug("Logging accuracy")
         self.log_dict({
-            'val/acc': metrics['val/acc'],
-            'val/top5': metrics['val/top5']
-        }, sync_dist=True)  # Only sync GPU metrics
+            k: v for k, v in metrics.items() 
+            if k in ['val/acc', 'val/top5']
+        }, sync_dist=True)  # Sync GPU metrics
         
         self._logger.debug("Logging text metrics")
         self.log_dict({
-            'val/bleu': metrics['val/bleu'],
-            'val/rougeL': metrics['val/rougeL']
+            k: v for k, v in metrics.items() 
+            if k in ['val/bleu', 'val/rougeL']
         }, sync_dist=False)  # Never sync CPU metrics
 
         self._logger.debug("Resetting metrics safely")
         # 4. Atomic reset with device check
-        self._reset_metrics_safely()
+        self._reset_metrics()
         self._logger.debug("Reset succesful!")
 
-    def _reset_metrics_safely(self):
-        """Ensure metrics reset without device errors"""
+    def _reset_metrics(self):
+        """Reset with device safety"""
         # GPU metrics
         self.val_acc.reset()
         self.val_top5.reset()
-        
-        # CPU metrics (force device if needed)
-        if str(self.val_bleu.device) != 'cpu':
-            self.val_bleu = self.val_bleu.cpu()
+
+        # CPU metrics
         self.val_bleu.reset()
-        
-        if str(self.val_rouge.device) != 'cpu':
-            self.val_rouge = self.val_rouge.cpu()
         self.val_rouge.reset()
         
+    def on_validation_start(self):
+        self._logger.debug(f"""
+        Device Report:
+        Model: {next(self.model.parameters()).device}
+        Accuracy: {self.val_acc.device}
+        BLEU: {self.val_bleu.device}
+        ROUGE: {self.val_rouge.device}
+        Trainer Strategy: {self.trainer.strategy.__class__.__name__}
+        """)    
+     
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
