@@ -512,34 +512,64 @@ class TransformerLightning(pl.LightningModule):
 
 
     def on_validation_epoch_end(self):
-        # Skip during sanity checking
+        """Complete rewrite with guaranteed device safety"""
         if self.trainer.sanity_checking:
             return
-        
-        # Compute metrics separately
-        self._logger.debug("Computing accuracy metrics")
-        acc = self.val_acc.compute()
-        top5 = self.val_top5.compute()
-        
-        # Handle sequence metrics safely
-        self._logger.debug("Computing sequence metrics")
-        bleu = self.val_bleu.compute() 
-        rouge = self.val_rouge.compute()['rougeL_fmeasure']
-        
-        # Log 
-        self._logger.debug("Logging metrics")
+
+        # 1. Compute metrics with explicit device management
+        metrics = {}
+        try:
+            # Standard metrics (GPU)
+            metrics.update({
+                'val/acc': self.val_acc.compute(),
+                'val/top5': self.val_top5.compute()
+            })
+        except Exception as e:
+            self._logger.error(f"Accuracy metrics failed: {e}")
+            metrics.update({'val/acc': torch.nan, 'val/top5': torch.nan})
+
+        # 2. Text metrics (forced CPU)
+        try:
+            with torch.no_grad():
+                if self.val_bleu._update_called:
+                    metrics['val/bleu'] = self.val_bleu.compute().cpu()
+                if self.val_rouge._update_called:
+                    metrics['val/rougeL'] = self.val_rouge.compute()['rougeL_fmeasure'].cpu()
+        except Exception as e:
+            self._logger.error(f"Text metrics failed: {e}")
+            metrics.update({'val/bleu': torch.nan, 'val/rougeL': torch.nan})
+
+        # 3. Safe logging (no sync for text metrics)
+        self._logger.debug("Logging accuracy")
         self.log_dict({
-            'val/acc': acc,
-            'val/top5': top5,
-            'val/bleu': bleu,
-            'val/rougeL': rouge
-        }, sync_dist=True)  # Critical change
+            'val/acc': metrics['val/acc'],
+            'val/top5': metrics['val/top5']
+        }, sync_dist=True)  # Only sync GPU metrics
         
-        # Reset metrics
-        self._logger.debug("Resetting metrics")
+        self._logger.debug("Logging text metrics")
+        self.log_dict({
+            'val/bleu': metrics['val/bleu'],
+            'val/rougeL': metrics['val/rougeL']
+        }, sync_dist=False)  # Never sync CPU metrics
+
+        self._logger.debug("Resetting metrics safely")
+        # 4. Atomic reset with device check
+        self._reset_metrics_safely()
+        self._logger.debug("Reset succesful!")
+
+    def _reset_metrics_safely(self):
+        """Ensure metrics reset without device errors"""
+        # GPU metrics
         self.val_acc.reset()
         self.val_top5.reset()
+        
+        # CPU metrics (force device if needed)
+        if str(self.val_bleu.device) != 'cpu':
+            self.val_bleu = self.val_bleu.cpu()
         self.val_bleu.reset()
+        
+        if str(self.val_rouge.device) != 'cpu':
+            self.val_rouge = self.val_rouge.cpu()
         self.val_rouge.reset()
         
     def training_step(self, batch, batch_idx):
