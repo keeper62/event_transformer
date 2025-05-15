@@ -562,23 +562,23 @@ class TransformerLightning(pl.LightningModule):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Get predictions (ensure no gradient flow)
         with torch.no_grad():
+            # Get predictions
             preds = logits.argmax(dim=-1)
-            
-            # Update accuracy metrics (automatically handles GPU)
+
+            # Update accuracy metrics
+            self._logger.debug("Updating accuracy metrics")
             self.val_acc.update(preds, targets)
             self.val_top5.update(logits, targets)
-            
-            # Explicitly move sequence data to CPU for text metrics
-            preds_cpu = preds.cpu()
-            targets_cpu = targets.cpu()
-            
-            # Convert to text format
-            preds_text = self._convert_to_text_format(preds_cpu)
-            targets_text = self._convert_to_text_format(targets_cpu)
-            
-            # Update metrics (now operating on CPU)
+
+            with torch.no_grad():
+                # Convert to text format for BLEU/ROUGE
+                self._logger.debug("Convert to text format for BLEU/ROUGE")
+                preds_text = self._convert_to_text_format(preds)
+                targets_text = self._convert_to_text_format(targets)
+
+            # Update sequence metrics
+            self._logger.debug("Updating sequence metrics")
             self.val_bleu.update(preds_text, targets_text)
             self.val_rouge.update(preds_text, targets_text)
 
