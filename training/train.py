@@ -606,7 +606,7 @@ class TransformerLightning(pl.LightningModule):
             'val/top5': top5,
             'val/bleu': bleu,
             'val/rougeL': rouge
-        }, sync_dist=False)  # Critical change
+        }, sync_dist=True)  # Critical change
         
         # Reset metrics
         self.val_acc.reset()
