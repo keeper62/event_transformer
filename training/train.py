@@ -439,7 +439,8 @@ class TransformerLightning(pl.LightningModule):
         self._logger.debug(f"Creating Transformer with config: {config['model']}")
         self.model = Transformer(config)
         self.num_classes = config['model']['vocab_size']
-        self._logger.info(f"Model initialized with num_classes: {self.num_classes}")
+        self.seq_len = config['model'].get('seq_len', 512)  # Assuming fixed sequence length
+        self._logger.info(f"Model initialized with num_classes: {self.num_classes}, seq_len: {self.seq_len}")
         
         # Important classes setup
         if important_classes is not None:
@@ -496,6 +497,7 @@ class TransformerLightning(pl.LightningModule):
             self._logger.info(f"Model will use GPU: {torch.cuda.get_device_name(0)}")
         else:
             self._logger.info("Model will use CPU")
+
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(inputs, sequences) 
@@ -518,9 +520,16 @@ class TransformerLightning(pl.LightningModule):
             top_k=5
         )
         
-        # Sequence metrics
-        self.val_bleu = BLEUScore(max_n=4)  # Average of BLEU-1 to BLEU-4
-        self.val_rouge = ROUGELScore()
+        # Sequence metrics - Updated to use torchmetrics implementations
+        self.val_bleu = torchmetrics.text.BLEUScore(n_gram=4)  # BLEU-1 to BLEU-4
+        self.val_rouge = torchmetrics.text.ROUGEScore(rouge_keys=("rougeL",), use_stemmer=False)
+        
+    def _convert_to_text_format(self, tensor: torch.Tensor):
+        """Convert event IDs tensor to string format expected by torchmetrics text metrics"""
+        # tensor shape: [batch_size, seq_len] or [batch_size * seq_len]
+        if tensor.dim() > 1:
+            tensor = tensor.view(-1, self.seq_len)
+        return [" ".join(map(str, seq.tolist())) for seq in tensor]
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -553,16 +562,33 @@ class TransformerLightning(pl.LightningModule):
         # Get predictions
         preds = logits.argmax(dim=-1)
         
-        # Update metrics
+        # Update accuracy metrics
         self.val_acc.update(preds, targets)
         self.val_top5.update(logits, targets)
         
-        # Update sequence metrics (BLEU & ROUGE)
-        self.val_bleu.update(preds, targets)  # Compare predicted vs target sequences
-        self.val_rouge.update(preds, targets)
+        # Calculate complete sequences
+        total_elements = (targets.shape[0] // self.seq_len) * self.seq_len
+        actual_batch_size = targets.shape[0] // self.seq_len
+        
+        # Only process sequence metrics if we have complete sequences
+        if total_elements > 0 and actual_batch_size > 0:
+            # Reshape to [batch_size, seq_len] for sequence metrics
+            preds_seq = preds[:total_elements].view(actual_batch_size, self.seq_len)
+            targets_seq = targets[:total_elements].view(actual_batch_size, self.seq_len)
+            
+            # Convert to text format for BLEU/ROUGE
+            preds_text = self._convert_to_text_format(preds_seq)
+            targets_text = self._convert_to_text_format(targets_seq)
+            
+            # Update sequence metrics
+            self.val_bleu.update(preds_text, targets_text)
+            self.val_rouge.update(preds_text, targets_text)
+        elif not self.trainer.sanity_checking:  # Skip warning during sanity check
+            self._logger.debug(f"Skipping sequence metrics - incomplete batch: {targets.shape[0]} elements (needed multiples of {self.seq_len})")
         
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
+
 
     def on_validation_epoch_end(self):
         try:
@@ -572,9 +598,7 @@ class TransformerLightning(pl.LightningModule):
             # Standard metrics
             for metric_name, metric in [
                 ('val/acc', self.val_acc),
-                ('val/top5_acc', self.val_top5),
-                ('val/bleu', self.val_bleu),
-                ('val/rougeL', self.val_rouge)
+                ('val/top5_acc', self.val_top5)
             ]:
                 try:
                     metrics[metric_name] = metric.compute()
@@ -582,9 +606,28 @@ class TransformerLightning(pl.LightningModule):
                     self._logger.warning(f"Failed to compute {metric_name}: {str(e)}")
                     metrics[metric_name] = float('nan')
             
+            # Sequence metrics with special handling
+            try:
+                bleu_score = self.val_bleu.compute()
+                metrics['val/bleu'] = bleu_score
+            except Exception as e:
+                self._logger.warning(f"Failed to compute BLEU: {str(e)}")
+                metrics['val/bleu'] = float('nan')
+                
+            try:
+                rouge_scores = self.val_rouge.compute()
+                metrics['val/rougeL_f1'] = rouge_scores['rougeL_fmeasure']
+            except Exception as e:
+                self._logger.warning(f"Failed to compute ROUGE: {str(e)}")
+                metrics['val/rougeL_f1'] = float('nan')
+            
             # Only log if we have valid metrics
             if metrics:
-                self.log_dict({k: v for k, v in metrics.items() if v is not None}, prog_bar=False, sync_dist=True)
+                self.log_dict(
+                    {k: v for k, v in metrics.items() if not torch.isnan(v) if v is not None},
+                    prog_bar=False,
+                    sync_dist=True
+                )
             else:
                 self._logger.warning("No valid metrics to log in validation epoch")
                 
