@@ -565,8 +565,8 @@ class TransformerLightning(pl.LightningModule):
         )
         
         # Sequence metrics - Updated to use torchmetrics implementations
-        self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
-        self.val_rouge = RougeL(exact_mode=False)
+        #self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
+        #self.val_rouge = RougeL(exact_mode=False)
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -606,8 +606,8 @@ class TransformerLightning(pl.LightningModule):
 
         self._logger.debug("Updating sequence metrics")
         # Update CPU-based metrics
-        self.val_bleu.update(preds, targets)
-        self.val_rouge.update(preds, targets)
+        #self.val_bleu.update(preds, targets)
+        #self.val_rouge.update(preds, targets)
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self._logger.debug("Validation step finished!")
@@ -634,11 +634,11 @@ class TransformerLightning(pl.LightningModule):
             if k in ['val/acc', 'val/top5']
         }, sync_dist=True)  # Sync GPU metrics
         
-        self._logger.debug("Logging text metrics")
-        self.log_dict({
-            k: v for k, v in metrics.items() 
-            if k in ['val/bleu', 'val/rougeL']
-        }, sync_dist=True)  # Never sync CPU metrics
+        #self._logger.debug("Logging text metrics")
+        #self.log_dict({
+        #    k: v for k, v in metrics.items() 
+        #    if k in ['val/bleu', 'val/rougeL']
+        #}, sync_dist=True)  # Never sync CPU metrics
      
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
