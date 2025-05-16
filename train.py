@@ -121,7 +121,7 @@ def train_with_config(
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp_spawn',
+            strategy='ddp',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
             gradient_clip_val=config['training'].get('gradient_clip_val', None),
