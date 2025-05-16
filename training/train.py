@@ -529,7 +529,7 @@ class TransformerLightning(pl.LightningModule):
                         f"gamma={config['training'].get('focal_gamma', 2.0)}, "
                         f"reduction='mean'")
         self.loss_fn = FocalLoss(
-            alpha=self.class_weights,
+            #alpha=self.class_weights,
             gamma=config['training'].get('focal_gamma', 2.0),
             reduction='mean'
         )
@@ -565,7 +565,7 @@ class TransformerLightning(pl.LightningModule):
         )
         
         # Sequence metrics - Updated to use torchmetrics implementations
-        #self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
+        self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
         #self.val_rouge = RougeL(exact_mode=False)
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
@@ -606,7 +606,7 @@ class TransformerLightning(pl.LightningModule):
 
         self._logger.debug("Updating sequence metrics")
         # Update CPU-based metrics
-        #self.val_bleu.update(preds, targets)
+        self.val_bleu.update(preds, targets)
         #self.val_rouge.update(preds, targets)
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -622,10 +622,10 @@ class TransformerLightning(pl.LightningModule):
         }
 
 
-        #metrics.update({
-        #    'val/bleu': self.val_bleu.compute(),
+        metrics.update({
+            'val/bleu': self.val_bleu.compute(),
         #    'val/rougeL': self.val_rouge.compute()
-        #})
+        })
 
         # 3. Safe logging (no sync for text metrics)
         self._logger.debug("Logging accuracy")
@@ -635,10 +635,10 @@ class TransformerLightning(pl.LightningModule):
         }, sync_dist=True)  # Sync GPU metrics
         
         #self._logger.debug("Logging text metrics")
-        #self.log_dict({
-        #    k: v for k, v in metrics.items() 
+        self.log_dict({
+            k: v for k, v in metrics.items() 
         #    if k in ['val/bleu', 'val/rougeL']
-        #}, sync_dist=True)  # Never sync CPU metrics
+        }, sync_dist=True)  # Never sync CPU metrics
      
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
