@@ -622,10 +622,10 @@ class TransformerLightning(pl.LightningModule):
         }
 
 
-        metrics.update({
-            'val/bleu': self.val_bleu.compute(),
-            'val/rougeL': self.val_rouge.compute()
-        })
+        #metrics.update({
+        #    'val/bleu': self.val_bleu.compute(),
+        #    'val/rougeL': self.val_rouge.compute()
+        #})
 
         # 3. Safe logging (no sync for text metrics)
         self._logger.debug("Logging accuracy")
