@@ -17,7 +17,6 @@ class BaseAttention(nn.Module):
         self.heads = model_cfg['num_heads']
         self.head_dim = self.dim // self.heads
         self.seq_len = model_cfg['context_length']
-        self.window_size = model_cfg['num_windows']
         self.scale = self.head_dim ** -0.5
         
         # Projection layers
