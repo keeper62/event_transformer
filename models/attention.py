@@ -38,7 +38,7 @@ class BaseAttention(nn.Module):
             nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
-        """Forward pass with combined causal + windowed masking."""
+        """Forward pass with standard causal masking (no windowing)."""
         B, T, _ = x.shape
 
         # Project queries, keys, values
@@ -48,9 +48,10 @@ class BaseAttention(nn.Module):
         # Compute attention scores
         attn_scores = (q @ k.transpose(-2, -1)) * self.scale
         
-        # Apply combined causal + windowed mask
+        # Apply standard causal mask (upper triangular)
         if mask:
-            attn_scores = self._apply_combined_mask(attn_scores)
+            causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).triu(diagonal=1)
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
         
         # Compute attention weights
         attn_weights = F.softmax(attn_scores, dim=-1)
@@ -62,23 +63,6 @@ class BaseAttention(nn.Module):
         
         return self.out_proj(out)
 
-    def _apply_combined_mask(self, attn_scores: torch.Tensor) -> torch.Tensor:
-        """Apply combined causal + windowed attention mask."""
-        B, H, T, _ = attn_scores.shape
-        device = attn_scores.device
-        
-        # Create base causal mask (upper triangular)
-        mask = torch.ones(T, T, device=device, dtype=torch.bool).triu(diagonal=1)
-        
-        # Apply window constraints
-        for i in range(T):
-            start = max(0, i - self.window_size)
-            end = min(T, i + self.window_size + 1)
-            mask[i, start:end] = False  # Allow attention within window
-        
-        # Apply additive masking
-        return attn_scores.masked_fill(mask, float('-inf'))
-
     def get_attention_weights(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
         """Return attention weights with same masking as forward pass."""
         with torch.no_grad():
@@ -89,7 +73,8 @@ class BaseAttention(nn.Module):
             attn_scores = (q @ k.transpose(-2, -1)) * self.scale
             
             if mask:
-                attn_scores = self._apply_combined_mask(attn_scores)
+                causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).triu(diagonal=1)
+                attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
             
             return F.softmax(attn_scores, dim=-1)
 

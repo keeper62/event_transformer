@@ -363,73 +363,6 @@ class DataModule(pl.LightningDataModule):
             self._logger.error(f"Problematic sample - input: {input_window}, output: {output_window}")
             raise
 
-    def get_class_weights(self, strategy: str = "inverse", max_samples: int = 100000) -> torch.Tensor:
-        self._logger.info("Computing class weights...")
-        
-        if not self._setup_complete:
-            self.setup()
-
-        vocab_size = self.config['model']['vocab_size']
-        counts = torch.zeros(vocab_size, dtype=torch.long)
-        
-        # Sample processing with enhanced debugging
-        n_samples = min(len(self.train_dataset), max_samples)
-        indices = torch.randperm(len(self.train_dataset))[:n_samples]
-        
-        self._logger.debug(f"Processing {n_samples} samples")
-        self._logger.debug(f"Vocab size: {vocab_size}")
-        
-        try:
-            # Process samples with validation
-            for i, idx in enumerate(indices):
-                _, targets, _ = self.train_dataset[idx]
-                
-                # Validate targets
-                if (targets < 0).any() or (targets >= vocab_size).any():
-                    invalid = targets[(targets < 0) | (targets >= vocab_size)]
-                    self._logger.error(f"Invalid targets in sample {i}: {invalid.cpu().numpy()}")
-                    self._logger.error(f"Target range: {targets.min().item()} to {targets.max().item()}")
-                    self._logger.error(f"Vocab size: {vocab_size}")
-                    raise ValueError("Invalid target indices detected")
-                    
-                unique, counts_batch = torch.unique(targets.flatten(), return_counts=True)
-                counts[unique] += counts_batch
-                
-                if i % 100 == 0:  # Progress logging
-                    self._logger.debug(f"Processed {i}/{n_samples} samples")
-                    
-        except Exception as e:
-            self._logger.error(f"Failed processing sample {i}: {str(e)}")
-            self._logger.error(f"Sample shapes - targets: {targets.shape}")
-            self._logger.error(f"Sample values - targets: {targets.cpu().numpy()}")
-            raise
-        
-        # Log class distribution
-        self._logger.debug(f"Class distribution - min: {counts.min()}, max: {counts.max()}, mean: {counts.float().mean()}")
-        
-        counts = counts.float() + 1e-6  # Smoothing
-        
-        # Weight calculation
-        if strategy == "inverse":
-            weights = 1.0 / counts
-        elif strategy == "sqrt":
-            weights = 1.0 / torch.sqrt(counts)
-        elif strategy == "balanced":
-            weights = (n_samples / vocab_size) / counts
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-        
-        weights = weights * (vocab_size / weights.sum())
-        
-        # Log statistics
-        self._logger.info(
-            f"Class weights: min={weights.min():.2f}, "
-            f"median={weights.median():.2f}, "
-            f"max={weights.max():.2f}"
-        )
-    
-        return weights
-
     def train_dataloader(self) -> DataLoader:
         self._logger.debug("Creating train DataLoader")
         return self._create_dataloader(self.train_dataset, shuffle=True)
@@ -470,7 +403,7 @@ class DataModule(pl.LightningDataModule):
             raise
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], class_weights: torch.Tensor, config_name: Optional[str] = None, 
+    def __init__(self, config: Dict[str, Any], config_name: Optional[str] = None, 
                 important_classes: torch.Tensor | None = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
@@ -501,18 +434,6 @@ class TransformerLightning(pl.LightningModule):
         # Initialize metrics
         self._logger.debug("Initializing metrics...")
         self._init_metrics()
-        
-        # Class weights validation
-        self.class_weights = class_weights
-        self._logger.debug(f"Class weights shape: {self.class_weights.shape} "
-                        f"(device: {self.class_weights.device})")
-        
-        # Verify class weights match num_classes
-        if len(self.class_weights) != self.num_classes:
-            error_msg = (f"class_weights length ({len(self.class_weights)}) "
-                        f"doesn't match num_classes ({self.num_classes})")
-            self._logger.error(error_msg)
-            raise ValueError(error_msg)
         
         # Verify important_classes are valid
         if len(self.important_classes) > 0:

@@ -1,7 +1,8 @@
-base_config:    
+base_config:
     # Environment settings
     device: "auto"  # Can be "auto", "cpu", "cuda", etc.
     seed: 42        # Random seed for reproducibility
+    debug: true
 
     # Model Hyperparameters
     model:
@@ -10,10 +11,9 @@ base_config:
         num_heads: 8
         num_layers: 6
         ffn_dim: 2048
-        num_windows: 64          # Sliding window size for multi-head attention
         max_len: 512
-        context_length: 256            # The # steps in the past as input
-        prediction_steps: 32      # The # steps in the future to predict
+        context_length: 64            # The # steps in the past as input
+        prediction_steps: 64      # The # steps in the future to predict
         num_groups: 6
         dropout: 0.1
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
@@ -41,8 +41,8 @@ base_config:
         
         # Early stopping (optional)
         early_stopping:
-            enabled: false       # Set to true to enable early stopping
-            patience: 5          # Number of epochs to wait before stopping
+            enabled: true       # Set to true to enable early stopping
+            patience: 3          # Number of epochs to wait before stopping
             min_delta: 0.001     # Minimum change to qualify as improvement
         
         # Optimization

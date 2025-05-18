@@ -70,13 +70,15 @@ def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     
     # Early stopping callback if configured
     if 'early_stopping' in config['training']:
-        early_stop_callback = EarlyStopping(
-            monitor="val/loss",
-            patience=config['training']['early_stopping']['patience'],
-            mode="min",
-            verbose=True,
-        )
-        callbacks.append(early_stop_callback)
+        if config['training']['early_stopping'].get('enabled', False):
+            early_stop_callback = EarlyStopping(
+                monitor="val/loss",
+                patience=config['training']['early_stopping']['patience'],
+                mode="min",
+                verbose=True,
+                min_delta=config['training']['early_stopping']['min_delta']
+            )
+            callbacks.append(early_stop_callback)
     
     return callbacks
 
@@ -101,14 +103,10 @@ def train_with_config(
         config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
         logger.debug(f"Vocab size tokenizer: {config['tokenizer']['vocab_size']} samples")
         
-        # Get class distribution (for imbalance handling)
-        class_weights = data_module.get_class_weights()
-        
         # Initialize model with class distribution
         logger.debug("Initializing model")
         model = TransformerLightning(
             config, 
-            class_weights,  # Changed from class_weights
             config_name, 
             important_classes=important_errors,
         )
@@ -121,7 +119,7 @@ def train_with_config(
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp',
+            strategy='ddp_find_unused_parameters_true',
             logger=logger_obj,
             callbacks=get_callbacks(config, test_mode),
             gradient_clip_val=config['training'].get('gradient_clip_val', None),
