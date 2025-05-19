@@ -50,7 +50,7 @@ def setup_environment(seed: int = 42) -> None:
     sys.path.append(os.path.abspath("."))
     torch.set_float32_matmul_precision('medium')
 
-def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
+def get_callbacks(config: Dict[str, Any], config_name: str, test_mode: bool = False) -> list:
     """Create and return a list of callbacks for the trainer."""
     if test_mode:
         return []
@@ -60,7 +60,7 @@ def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     # Model checkpoint callback - improved configuration
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename=f"{config['name']}-{{epoch}}-{{val/loss:.2f}}",  # Use config name directly
+        filename=f"{config_name}-{{epoch}}-{{val/loss:.2f}}",  # Use config name directly
         monitor=config['training'].get('monitor', 'val/loss'),
         mode="min",
         save_top_k=config['training'].get('save_top_k', 1),
@@ -115,7 +115,7 @@ def train_with_config(
 
         # Configure logger and callbacks
         logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
-        callbacks = get_callbacks(config, test_mode)
+        callbacks = get_callbacks(config, config_name, test_mode)
         
         # Initialize trainer
         trainer = pl.Trainer(
