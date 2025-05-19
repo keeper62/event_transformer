@@ -612,7 +612,7 @@ class TransformerLightning(pl.LightningModule):
             factor=training_cfg.get('lr_factor', 0.1),
             patience=training_cfg.get('lr_patience', 3),
             threshold=1e-4,
-            min_lr=1e-6
+            min_lr=training_cfg.get('min_lr', 1e-6)
         )
 
         return {

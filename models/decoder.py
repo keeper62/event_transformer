@@ -24,10 +24,10 @@ class TransformerDecoderLayer(nn.Module):
     def _init_configurations(self, config: Dict[str, Any]) -> None:
         """Initialize training configurations before components."""
         # Pre-normalization flag (default to True for modern architectures)
-        self.pre_norm = config['training'].get('pre_norm', True)
+        self.pre_norm = self.model_cfg.get('pre_norm', True)
         
         # Gradient checkpointing
-        if config['training'].get('gradient_checkpointing', False):
+        if self.model_cfg.get('gradient_checkpointing', False):
             self.forward = torch.utils.checkpoint.checkpoint(self._forward_impl)
         else:
             self.forward = self._forward_impl
@@ -43,7 +43,7 @@ class TransformerDecoderLayer(nn.Module):
         
         self.ffn = FeedForward(config)
         
-        norm_eps = config['training'].get('layer_norm_eps', 1e-5)
+        norm_eps = self.model_cfg.get('layer_norm_eps', 1e-5)
         self.norm1 = nn.LayerNorm(self.embed_dim, eps=norm_eps)
         self.norm2 = nn.LayerNorm(self.embed_dim, eps=norm_eps)
         self.norm3 = nn.LayerNorm(self.embed_dim, eps=norm_eps)
