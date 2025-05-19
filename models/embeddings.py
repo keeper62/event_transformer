@@ -53,7 +53,7 @@ class Embeddings(nn.Module):
         self.position_embedding = None
         ape_config = config.get('position', {})
         
-        if ape_config.get('ape_class', False):
+        if ape_config.get('ape_class', None) is not None:
             try:
                 position_module = importlib.import_module(f"{Path(__file__).parent.name}.position")
                 position_class = getattr(position_module, ape_config['ape_class'])

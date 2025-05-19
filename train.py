@@ -57,28 +57,30 @@ def get_callbacks(config: Dict[str, Any], test_mode: bool = False) -> list:
     
     callbacks = []
     
-    # Model checkpoint callback
+    # Model checkpoint callback - improved configuration
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename=f"{{config_name}}-{{epoch}}-{{val/loss:.2f}}",
+        filename=f"{config['name']}-{{epoch}}-{{val/loss:.2f}}",  # Use config name directly
         monitor=config['training'].get('monitor', 'val/loss'),
         mode="min",
         save_top_k=config['training'].get('save_top_k', 1),
         save_last=True,
+        auto_insert_metric_name=False,  # Cleaner filenames
+        every_n_epochs=1,
+        save_on_train_epoch_end=False  # Validate at end of validation epoch
     )
     callbacks.append(checkpoint_callback)
     
     # Early stopping callback if configured
-    if 'early_stopping' in config['training']:
-        if config['training']['early_stopping'].get('enabled', False):
-            early_stop_callback = EarlyStopping(
-                monitor="val/loss",
-                patience=config['training']['early_stopping']['patience'],
-                mode="min",
-                verbose=True,
-                min_delta=config['training']['early_stopping']['min_delta']
-            )
-            callbacks.append(early_stop_callback)
+    if config['training'].get('early_stopping', {}).get('enabled', False):
+        early_stop_callback = EarlyStopping(
+            monitor=config['training'].get('monitor', 'val/loss'),
+            patience=config['training']['early_stopping']['patience'],
+            mode="min",
+            verbose=True,
+            min_delta=config['training']['early_stopping'].get('min_delta', 0.0)
+        )
+        callbacks.append(early_stop_callback)
     
     return callbacks
 
@@ -103,7 +105,7 @@ def train_with_config(
         config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
         logger.debug(f"Vocab size tokenizer: {config['tokenizer']['vocab_size']} samples")
         
-        # Initialize model with class distribution
+        # Initialize model
         logger.debug("Initializing model")
         model = TransformerLightning(
             config, 
@@ -111,9 +113,11 @@ def train_with_config(
             important_classes=important_errors,
         )
 
-        # Rest of your training setup remains the same...
+        # Configure logger and callbacks
         logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
+        callbacks = get_callbacks(config, test_mode)
         
+        # Initialize trainer
         trainer = pl.Trainer(
             max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
             devices=num_accelerators,
@@ -121,7 +125,7 @@ def train_with_config(
             num_nodes=num_nodes,
             strategy='ddp_find_unused_parameters_true',
             logger=logger_obj,
-            callbacks=get_callbacks(config, test_mode),
+            callbacks=callbacks,
             gradient_clip_val=config['training'].get('gradient_clip_val', None),
             deterministic=True,
             enable_checkpointing=not test_mode,
@@ -130,28 +134,39 @@ def train_with_config(
             overfit_batches=config['training'].get('overfit_batches', 0),
             enable_progress_bar=int(os.getenv("LOCAL_RANK", 0)) == 0,
             precision='16-mixed',
-            accumulate_grad_batches=4
+            accumulate_grad_batches=config['training'].get('accumulate_grad_batches', 1)
         )
 
         logger.info(f"Starting training with config: {config_name}")
         trainer.fit(model, datamodule=data_module)
         
-        trainer.test(datamodule=data_module)
+        # Handle testing based on available checkpoints
+        checkpoint_callback = next(
+            (cb for cb in callbacks if isinstance(cb, ModelCheckpoint)), 
+            None
+        )
         
-        if not test_mode:
+        if test_mode:
+            logger.info("Running in test mode")
+            trainer.test(model=model, datamodule=data_module)
+        else:
+            # Save final model
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)
             model_path = save_dir / f"trained_model_{config_name}_final.ckpt"
             trainer.save_checkpoint(str(model_path))
-            logger.info(f"Model saved to {model_path}")
+            logger.info(f"Final model saved to {model_path}")
             
-            if any(isinstance(cb, ModelCheckpoint) for cb in trainer.callbacks):
-                best_model_path = trainer.checkpoint_callback.best_model_path
-                if best_model_path:
-                    logger.info(f"Best model saved at: {best_model_path}")
+            # Determine which model to test
+            if checkpoint_callback and checkpoint_callback.best_model_path:
+                logger.info(f"Testing with best checkpoint: {checkpoint_callback.best_model_path}")
+                trainer.test(ckpt_path="best", datamodule=data_module)
+            else:
+                logger.info("No best checkpoint found, testing with final model")
+                trainer.test(model=model, datamodule=data_module)
 
     except Exception as e:
-        logger.error(f"Training failed with error: {str(e)}")
+        logger.error(f"Training failed with error: {str(e)}", exc_info=True)
         raise
 
 def main() -> None:

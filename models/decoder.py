@@ -1,5 +1,4 @@
 from models.feed_forward import FeedForward
-
 import torch
 import torch.nn as nn
 import importlib
@@ -14,26 +13,20 @@ class TransformerDecoderLayer(nn.Module):
         self.context_length = self.model_cfg['context_length']
         self.vocab_size = config['tokenizer'].get('vocab_size', 64)
         
-        # Initialize configurations first (needed for component init)
-        self._init_configurations(config)  # <- Now called before components
+        # Initialize configurations first
+        self._init_configurations(config)
         self._init_components(config)
         
         self.template_embed = nn.Embedding(self.vocab_size, self.embed_dim)
         self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def _init_configurations(self, config: Dict[str, Any]) -> None:
-        """Initialize training configurations before components."""
-        # Pre-normalization flag (default to True for modern architectures)
+        """Initialize training configurations."""
         self.pre_norm = self.model_cfg.get('pre_norm', True)
-        
-        # Gradient checkpointing
-        if self.model_cfg.get('gradient_checkpointing', False):
-            self.forward = torch.utils.checkpoint.checkpoint(self._forward_impl)
-        else:
-            self.forward = self._forward_impl
+        self.gradient_checkpointing = self.model_cfg.get('gradient_checkpointing', False)
         
     def _init_components(self, config: Dict[str, Any]) -> None:
-        """Initialize layer components with proper typing."""
+        """Initialize layer components."""
         try:
             attn_module = importlib.import_module(f"{Path(__file__).parent.name}.attention")
             decoder_class = getattr(attn_module, config['decoder']['decoder_class'])
@@ -51,12 +44,9 @@ class TransformerDecoderLayer(nn.Module):
         self.attn_dropout = nn.Dropout(self.model_cfg.get('attn_dropout', 0.1))
         self.ffn_dropout = nn.Dropout(self.model_cfg.get('ffn_dropout', 0.1))
         
-        # Register as trainable parameters
         self.residual_scaling = nn.Parameter(
             torch.tensor(config['training'].get('residual_scaling', 1.0))
         )
-        
-        # If you want bias_scale to be trainable per layer
         self.bias_scale = nn.Parameter(
             torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
         )
@@ -70,8 +60,8 @@ class TransformerDecoderLayer(nn.Module):
         bias: Optional[torch.Tensor] = None,
         attention_mask: bool = False
     ) -> torch.Tensor:
-        """Type-annotated sublayer forward pass."""
-        residual_connection = x  # More explicit than modifying input
+        """Sublayer forward pass with residual connection."""
+        residual = x
         
         if self.pre_norm:
             x = norm(x)
@@ -86,13 +76,15 @@ class TransformerDecoderLayer(nn.Module):
         if not self.pre_norm:
             x_out = norm(x_out)
             
-        return residual_connection + (x_out * torch.sigmoid(self.residual_scaling)) # to set between 0-1
+        return residual + (x_out * torch.sigmoid(self.residual_scaling))
 
     def _forward_impl(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
+        """Implementation of forward pass."""
+        embed_bias = None
         if self.model_cfg['bias_injection'] is not None:
             embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)
         
-        # Sublayer 1: Masked Self-Attention
+        # Self-attention
         x = self._forward_sublayer(
             x,
             lambda x, mask: self.attn(x, mask=mask),
@@ -102,19 +94,19 @@ class TransformerDecoderLayer(nn.Module):
             attention_mask=True
         )
         
-        # Sublayer 2: Cross-Attention (optional)
+        # Cross-attention
         x = self._forward_sublayer(
             x,
-            lambda x, _: self.attn(x),  # Ignore mask for cross-attention
+            lambda x, _: self.attn(x),
             self.norm2,
             self.attn_dropout,
             embed_bias if self.model_cfg['bias_injection'] == "attention" else None
         )
         
-        # Sublayer 3: FFN
+        # FFN
         x = self._forward_sublayer(
             x,
-            lambda x, _: self.ffn(x),  # FFN doesn't use mask
+            lambda x, _: self.ffn(x),
             self.norm3,
             self.ffn_dropout,
             embed_bias if self.model_cfg['bias_injection'] == "ffn" else None
@@ -123,5 +115,20 @@ class TransformerDecoderLayer(nn.Module):
         return x
     
     def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
-        """Public forward with autocast support."""
+        """Public forward pass with gradient checkpointing support."""
+        if self.gradient_checkpointing and self.training:
+            # Create a closure for proper checkpointing
+            def create_custom_forward():
+                def custom_forward(*inputs):
+                    x, sequences = inputs
+                    return self._forward_impl(x, sequences)
+                return custom_forward
+            
+            return torch.utils.checkpoint.checkpoint(
+                create_custom_forward(),
+                x,
+                sequences,
+                use_reentrant=False,  # Recommended for newer PyTorch versions
+                preserve_rng_state=True
+            )
         return self._forward_impl(x, sequences)

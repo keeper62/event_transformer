@@ -11,7 +11,6 @@ class Transformer(nn.Module):
         
         # Configuration
         self.out_features: int = model_cfg['vocab_size']
-        self.n_steps: int = model_cfg['prediction_steps']
         self.embed_dim: int = model_cfg['embed_dim']
         self.num_layers: int = model_cfg['num_layers']
         

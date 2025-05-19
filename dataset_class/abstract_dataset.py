@@ -29,11 +29,10 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     return logger
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, prediction_steps, context_length, template_miner=None, tokenizer=None, test_mode=False):
+    def __init__(self, path, context_length, template_miner=None, tokenizer=None, test_mode=False):
         self.path = path
         self.template_miner = template_miner
         self.tokenizer = tokenizer
-        self.prediction_steps = prediction_steps
         self.context_length = context_length
         self.test_mode = test_mode
         
@@ -83,10 +82,8 @@ class AbstractBGLDataset(Dataset, ABC):
     def _generate_adaptive_windows(self):
         """Generate windows with shape validation"""
         sample_indices = []
-        total_window_size = self.context_length + self.prediction_steps
-        self.logger.debug(f"Generating windows with context_length={self.context_length}, "
-              f"prediction_steps={self.prediction_steps}, "
-              f"total_window_size={total_window_size}")
+        total_window_size = self.context_length + 1
+        self.logger.debug(f"Generating windows with context_length={self.context_length}")
 
         for group_idx, (tokens, _) in enumerate(self.grouped_data):
             seq_len = len(tokens)

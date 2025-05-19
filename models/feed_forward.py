@@ -25,9 +25,6 @@ class FeedForward(nn.Module):
         self.dropout1 = nn.Dropout(dropout_p)
         self.dropout2 = nn.Dropout(dropout_p)
         
-        # Layer normalization
-        self.norm = nn.LayerNorm(embed_dim) if training_cfg.get('ffn_pre_norm', False) else None
-        
         # Residual connection scaling
         self.residual_scaling = training_cfg.get('residual_scaling', 1.0)
         
@@ -66,10 +63,6 @@ class FeedForward(nn.Module):
             Output tensor of same shape with feed-forward transformation applied
         """
         residual = x
-        
-        # Apply pre-normalization if configured
-        if self.norm is not None:
-            x = self.norm(x)
         
         # First linear layer + activation + dropout
         x = self.fc1(x)

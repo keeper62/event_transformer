@@ -47,22 +47,26 @@ class LightningNGramScore(torchmetrics.Metric):
         super().__init__()
         self.ngram_size = ngram_size
         
-        # Lightning-managed states
         self.add_state("match_counts", default=torch.zeros(ngram_size), dist_reduce_fx="sum")
         self.add_state("total_counts", default=torch.zeros(ngram_size), dist_reduce_fx="sum")
     
     def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        """
+        preds: [batch_size, seq_len, vocab_size] logits
+        targets: [batch_size, seq_len] ground truth indices
+        """
+        # Convert logits to predictions
+        preds = preds.argmax(dim=-1)  # [batch_size, seq_len]
+        
         # Ensure 2D input
         if preds.dim() == 1:
             preds = preds.unsqueeze(0)
             targets = targets.unsqueeze(0)
             
         for n in range(1, self.ngram_size + 1):
-            # Extract n-grams using unfold
             pred_ngrams = preds.unfold(1, n, 1)   # [batch, ngram_windows, n]
             target_ngrams = targets.unfold(1, n, 1)
             
-            # Compare n-grams
             matches = (pred_ngrams == target_ngrams).all(dim=-1)
             self.match_counts[n-1] += matches.sum().float()
             self.total_counts[n-1] += matches.numel()
@@ -74,7 +78,7 @@ class LightningNGramScore(torchmetrics.Metric):
 class RougeL(torchmetrics.Metric):
     def __init__(self, exact_mode=True, fast_threshold=0.9):
         super().__init__()
-        self.exact_mode = exact_mode  # False for approximate-only
+        self.exact_mode = exact_mode
         self.fast_threshold = fast_threshold
         
         self.add_state("lcs_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
@@ -83,51 +87,47 @@ class RougeL(torchmetrics.Metric):
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, targets: torch.Tensor):
-        """Process 1D sequences with ultra-optimized LCS"""
-        # Input validation
-        if preds.dim() != 1 or targets.dim() != 1:
-            raise ValueError("Inputs must be 1D tensors")
+        """
+        preds: [batch_size, seq_len, vocab_size] logits
+        targets: [batch_size, seq_len] ground truth indices
+        """
+        preds = preds.argmax(dim=-1)  # Convert to predictions
         
-        lcs_len = self._lightning_lcs(preds, targets)
-        pred_len = len(preds)
-        target_len = len(targets)
-        
-        self.lcs_sum += lcs_len
-        self.pred_len_sum += pred_len
-        self.target_len_sum += target_len
-        self.total += 1
+        # Process each sequence in batch
+        for pred, target in zip(preds, targets):
+            pred = pred[pred != -100]  # Remove padding if needed
+            target = target[target != -100]
+            
+            lcs_len = self._lightning_lcs(pred, target)
+            self.lcs_sum += lcs_len
+            self.pred_len_sum += len(pred)
+            self.target_len_sum += len(target)
+            self.total += 1
 
+    # Keep all existing LCS implementation methods unchanged
     def _lightning_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """Optimized LCS pipeline with all speed tricks"""
-        # Early exit for empty sequences
         if len(a) == 0 or len(b) == 0:
             return torch.tensor(0.0, device=a.device)
         
-        # Instant match check
         if torch.equal(a, b):
             return torch.tensor(len(a), device=a.device)
         
-        # Prefix/suffix shortcut
         min_len = min(len(a), len(b))
         if torch.equal(a[:min_len], b[:min_len]) or torch.equal(a[-min_len:], b[-min_len:]):
             return torch.tensor(min_len, device=a.device)
         
-        # Fast path: Content similarity check
         if self._content_similarity(a, b) >= self.fast_threshold:
             return torch.tensor(min_len, device=a.device)
         
-        # Fallback to exact LCS if needed
         return self._exact_lcs(a, b) if self.exact_mode else self._approx_lcs(a, b)
 
     def _content_similarity(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Quick similarity estimate using unique elements"""
         unique_match = torch.isin(a.unique(), b.unique()).float().mean()
         len_ratio = min(len(a), len(b)) / max(len(a), len(b))
         return (unique_match + len_ratio) / 2
 
     def _approx_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Conservative approximation using element matching"""
-        # Count matches without order consideration
         a_vals, a_counts = torch.unique(a, return_counts=True)
         b_vals, b_counts = torch.unique(b, return_counts=True)
         
@@ -136,12 +136,10 @@ class RougeL(torchmetrics.Metric):
         return matched.sum().float()
 
     def _exact_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Memory-optimized DP implementation"""
         m, n = len(a), len(b)
         if m == 0 or n == 0:
             return torch.tensor(0.0, device=a.device)
         
-        # Use two rolling rows for O(n) space
         dp = torch.zeros(2, n+1, dtype=torch.long, device=a.device)
         
         for i in range(1, m+1):
@@ -154,7 +152,6 @@ class RougeL(torchmetrics.Metric):
         return dp[1, n].float()
 
     def compute(self) -> torch.Tensor:
-        """Compute final ROUGE-L F1 with numerical stability"""
         precision = self.lcs_sum / self.pred_len_sum.clamp(min=1e-6)
         recall = self.lcs_sum / self.target_len_sum.clamp(min=1e-6)
         f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
@@ -279,17 +276,16 @@ class DataModule(pl.LightningDataModule):
             self._logger.debug("Creating full dataset...")
             full_dataset = self.dataset_class(
                 path=self.config['dataset']['path'],
-                prediction_steps=self.config['model']['prediction_steps'],
                 context_length=self.config['model']['context_length'],
                 template_miner=self.template_miner.transform,
                 tokenizer=self.tokenizer.transform,
                 test_mode=self.test_mode
             )
-            self._logger.info(f"Full dataset created with {len(self.full_dataset)} samples")
+            self._logger.info(f"Full dataset created with {len(full_dataset)} samples")
             
             # Validate dataset samples
             self._logger.debug("Validating dataset samples...")
-            self._validate_dataset_shapes(self.full_dataset)
+            self._validate_dataset_shapes(full_dataset)
             
             # Split dataset
             self._logger.debug("Splitting dataset...")
@@ -456,152 +452,80 @@ class TransformerLightning(pl.LightningModule):
         return self.model(inputs, sequences) 
 
     def _init_metrics(self):
-        """Initialize all TorchMetrics for evaluation"""
+        """Initialize metrics using MetricCollection for efficient logging"""
+        # Common metrics for all phases
+        base_metrics = {
+            "acc": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes),
+            "top5": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes, top_k=5),
+        }
+        
         # Training metrics
-        self.train_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
-        self.train_top5 = torchmetrics.Accuracy(
-            task='multiclass',
-            num_classes=self.num_classes,
-            top_k=5
+        self.train_metrics = torchmetrics.MetricCollection(
+            {**base_metrics},
+            prefix="train/"
         )
         
         # Validation metrics
-        self.val_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
-        self.val_top5 = torchmetrics.Accuracy(
-            task='multiclass',
-            num_classes=self.num_classes,
-            top_k=5
+        self.val_metrics = torchmetrics.MetricCollection(
+            {
+                **base_metrics,
+                "bleu": LightningNGramScore(ngram_size=4),
+                "rougeL": RougeL(),
+            },
+            prefix="val/"
         )
         
-        # Sequence metrics - Updated to use torchmetrics implementations
-        self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
-        self.val_rouge = RougeL()
-        
-        self.test_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
-        self.test_top5 = torchmetrics.Accuracy(
-            task='multiclass',
-            num_classes=self.num_classes,
-            top_k=5
-        )
-        
-        self.test_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
-        self.test_rouge = RougeL()
-
-    def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
-        """Boost weights for important classes (tensor version)"""
-        adjusted_weights = original_weights.clone()
-        if len(self.important_classes) > 0:
-            # Ensure we don't try to boost classes beyond the weight vector length
-            valid_mask = self.important_classes < len(adjusted_weights)
-            valid_classes = self.important_classes[valid_mask]
-            adjusted_weights[valid_classes] *= self.importance_boost_factor
-        return adjusted_weights
+        # Test metrics
+        self.test_metrics = self.val_metrics.clone(prefix="test/")
 
     def _process_batch(self, batch):
         inputs, targets, sequences = batch
         logits = self.model(inputs, sequences)
-        
-        logits = logits.half()  
-        
-        # Reshape logits from [N, B, C] to [N * B, C]
-        logits = logits.reshape(-1, logits.shape[-1])
+        logits = logits.half()  # Use mixed precision
+        return logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)
 
-        # Reshape targets from [N, B] to [N * B]
-        targets = targets.reshape(-1)
-        
-        return logits, targets    # Now targets already shifted
-
-    def validation_step(self, batch, batch_idx):
-        self._logger.debug("Validation step Started!")
-        logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(logits, targets)
-        
-        preds = logits.argmax(dim=-1)
-
-        # Update accuracy metrics
-        self._logger.debug("Updating accuracy metrics")
-        self.val_acc.update(preds, targets)
-        self.val_top5.update(logits, targets)
-
-        self._logger.debug("Updating sequence metrics")
-        # Update CPU-based metrics
-        self.val_bleu.update(preds, targets)
-        self.val_rouge.update(preds, targets)
-
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        self._logger.debug("Validation step finished!")
-        return loss
-
-
-    def on_validation_epoch_end(self):
-        """Complete rewrite with guaranteed device safety"""
-        metrics = {
-            'val/acc': self.val_acc.compute(),
-            'val/top5': self.val_top5.compute(),
-            'val/bleu': self.val_bleu.compute(),
-            'val/rougeL': self.val_rouge.compute()
-        }
-
-        # 3. Safe logging (no sync for text metrics)
-        self._logger.debug("Logging accuracy")
-        self.log_dict({
-            k: v for k, v in metrics.items() 
-        }, sync_dist=True)  # Sync GPU metrics
-     
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Compute training accuracy
-        preds = logits.argmax(dim=-1)
-        
-        # Update training metrics
-        self.train_acc.update(preds, targets)
-        self.train_top5.update(logits, targets)
-        
-        # Log metrics
+        # Update and log metrics
+        metrics = self.train_metrics(logits, targets)
+        self.log_dict(metrics, on_step=True, on_epoch=True, sync_dist=True)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/acc", self.train_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/top5_acc", self.train_top5, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         return loss
-    
-    def on_train_batch_start(self, batch, batch_idx):
-        if batch_idx % 100 == 0:
-            logging.debug(f"\nMemory Usage (Batch {batch_idx}):")
-            if torch.cuda.is_available():
-                logging.debug(f"GPU Allocated: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-                logging.debug(f"GPU Reserved: {torch.cuda.memory_reserved()/1e9:.2f}GB")
-            else:
-                import psutil
-                process = psutil.Process()
-                logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
-                logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
-            
-    def test_step(self, batch, batch_idx):
-        """Comprehensive test step with all metrics"""
+
+    def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(logits, targets)
         
-        # Get predictions
-        preds = logits.argmax(dim=-1)
-        probs = torch.softmax(logits, dim=-1)
+        # Update metrics
+        self.val_metrics.update(logits, targets)
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         
-        # Update all test metrics
-        self.test_acc.update(preds, targets)
-        self.test_top5.update(logits, targets)
-        self.test_bleu.update(preds, targets)
-        self.test_rouge.update(preds, targets)
+        return loss
+
+    def on_validation_epoch_end(self):
+        # Compute all validation metrics
+        val_metrics = self.val_metrics.compute()
+        self.log_dict(val_metrics, sync_dist=True)
+        self.val_metrics.reset()
+
+    def test_step(self, batch, batch_idx):
+        logits, targets = self._process_batch(batch)
+        loss = self.loss_fn(logits, targets)
         
-        # Log test loss
-        self.log("test/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        # Update test metrics
+        self.test_metrics.update(logits, targets)
+        self.log("test/loss", loss, on_epoch=True, sync_dist=True)
         
-        return {
-            'loss': loss,
-            'preds': preds,
-            'targets': targets,
-            'probs': probs
-        }
+        return {"loss": loss, "preds": logits.argmax(dim=-1), "targets": targets}
+    
+    def on_test_epoch_end(self):
+        # Compute all test metrics
+        test_metrics = self.test_metrics.compute()
+        self.log_dict(test_metrics, sync_dist=True)
+        self.test_metrics.reset()
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
@@ -631,3 +555,15 @@ class TransformerLightning(pl.LightningModule):
                 "frequency": 1
             }
         }
+        
+    def on_train_batch_start(self, batch, batch_idx):
+        if batch_idx % 100 == 0:
+            logging.debug(f"\nMemory Usage (Batch {batch_idx}):")
+            if torch.cuda.is_available():
+                logging.debug(f"GPU Allocated: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+                logging.debug(f"GPU Reserved: {torch.cuda.memory_reserved()/1e9:.2f}GB")
+            else:
+                import psutil
+                process = psutil.Process()
+                logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
+                logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
