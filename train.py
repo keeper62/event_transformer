@@ -136,6 +136,8 @@ def train_with_config(
         logger.info(f"Starting training with config: {config_name}")
         trainer.fit(model, datamodule=data_module)
         
+        trainer.test(datamodule=data_module)
+        
         if not test_mode:
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)

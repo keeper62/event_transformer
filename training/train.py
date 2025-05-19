@@ -222,6 +222,7 @@ class DataModule(pl.LightningDataModule):
         self.config = config
         self.test_mode = test_mode
         self._setup_complete = False
+        self.split_ratios = config['dataset'].get('split_ratios', [0.8, 0.1, 0.1])
         
         self._logger = setup_logger(self.__class__.__name__)
         self._logger.debug(f"Initializing DataModule with config: {config}")
@@ -276,7 +277,7 @@ class DataModule(pl.LightningDataModule):
         try:
             # Initialize full dataset
             self._logger.debug("Creating full dataset...")
-            self.full_dataset = self.dataset_class(
+            full_dataset = self.dataset_class(
                 path=self.config['dataset']['path'],
                 prediction_steps=self.config['model']['prediction_steps'],
                 context_length=self.config['model']['context_length'],
@@ -292,27 +293,17 @@ class DataModule(pl.LightningDataModule):
             
             # Split dataset
             self._logger.debug("Splitting dataset...")
-            if self.test_mode:
-                test_size = min(100, len(self.full_dataset) // 10)
-                train_size = len(self.full_dataset) - test_size
-                self._logger.info(f"Test mode: splitting into {train_size} train, {test_size} test samples")
-                
-                self.train_dataset, self.test_dataset = random_split(
-                    self.full_dataset, 
-                    [train_size, test_size],
-                    generator=torch.Generator().manual_seed(42)
-                )
-                self.val_dataset = self.test_dataset
-            else:
-                val_size = min(int(0.2 * len(self.full_dataset)), 4096)
-                train_size = len(self.full_dataset) - val_size
-                self._logger.info(f"Train mode: splitting into {train_size} train, {val_size} val samples")
-                
-                self.train_dataset, self.val_dataset = random_split(
-                    self.full_dataset,
-                    [train_size, val_size],
-                    generator=torch.Generator().manual_seed(42)
-                )
+            total_size = len(full_dataset)
+            train_size = int(self.split_ratios[0] * total_size)
+            val_size = int(self.split_ratios[1] * total_size)
+            test_size = total_size - train_size - val_size
+
+            # Split the dataset
+            self.train_dataset, self.val_dataset, self.test_dataset = random_split(
+                full_dataset,
+                [train_size, val_size, test_size],
+                generator=torch.Generator().manual_seed(42)  # For reproducibility
+            )
 
             # Validate split datasets
             self._logger.debug("Validating split datasets...")
@@ -372,9 +363,6 @@ class DataModule(pl.LightningDataModule):
         return self._create_dataloader(self.val_dataset, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
-        if not hasattr(self, 'test_dataset'):
-            self._logger.debug("No test dataset available")
-            return None
         self._logger.debug("Creating test DataLoader")
         return self._create_dataloader(self.test_dataset, shuffle=False)
 
@@ -488,6 +476,16 @@ class TransformerLightning(pl.LightningModule):
         # Sequence metrics - Updated to use torchmetrics implementations
         self.val_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
         self.val_rouge = RougeL()
+        
+        self.test_acc = torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes)
+        self.test_top5 = torchmetrics.Accuracy(
+            task='multiclass',
+            num_classes=self.num_classes,
+            top_k=5
+        )
+        
+        self.test_bleu = LightningNGramScore(ngram_size=4) # BLEU-4
+        self.test_rouge = RougeL()
 
     def _adjust_class_weights(self, original_weights: torch.Tensor) -> torch.Tensor:
         """Boost weights for important classes (tensor version)"""
@@ -568,22 +566,6 @@ class TransformerLightning(pl.LightningModule):
         
         return loss
     
-    def on_train_epoch_end(self):
-        """Log training metrics at epoch end"""
-        try:
-            train_acc = self.train_acc.compute()
-            train_top5 = self.train_top5.compute()
-            
-            self.log("train/epoch_acc", train_acc, prog_bar=False, sync_dist=True)
-            self.log("train/epoch_top5", train_top5, prog_bar=False, sync_dist=True)
-            
-            self._logger.info(f"Training Accuracy: {train_acc:.4f}, Top-5 Accuracy: {train_top5:.4f}")
-        except Exception as e:
-            self._logger.warning(f"Failed to compute training metrics: {str(e)}")
-        finally:
-            self.train_acc.reset()
-            self.train_top5.reset()
-    
     def on_train_batch_start(self, batch, batch_idx):
         if batch_idx % 100 == 0:
             logging.debug(f"\nMemory Usage (Batch {batch_idx}):")
@@ -595,6 +577,31 @@ class TransformerLightning(pl.LightningModule):
                 process = psutil.Process()
                 logging.debug(f"CPU Memory Used: {process.memory_info().rss/1e9:.2f}GB")
                 logging.debug(f"System Available: {psutil.virtual_memory().available/1e9:.2f}GB")
+            
+    def test_step(self, batch, batch_idx):
+        """Comprehensive test step with all metrics"""
+        logits, targets = self._process_batch(batch)
+        loss = self.loss_fn(logits, targets)
+        
+        # Get predictions
+        preds = logits.argmax(dim=-1)
+        probs = torch.softmax(logits, dim=-1)
+        
+        # Update all test metrics
+        self.test_acc.update(preds, targets)
+        self.test_top5.update(logits, targets)
+        self.test_bleu.update(preds, targets)
+        self.test_rouge.update(preds, targets)
+        
+        # Log test loss
+        self.log("test/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        return {
+            'loss': loss,
+            'preds': preds,
+            'targets': targets,
+            'probs': probs
+        }
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
@@ -612,7 +619,7 @@ class TransformerLightning(pl.LightningModule):
             factor=training_cfg.get('lr_factor', 0.1),
             patience=training_cfg.get('lr_patience', 3),
             threshold=1e-4,
-            min_lr=training_cfg.get('min_lr', 1e-6)
+            min_lr=training_cfg.get('min_lr', 0.1)
         )
 
         return {

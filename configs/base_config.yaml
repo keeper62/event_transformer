@@ -76,6 +76,7 @@ base_config:
         pin_memory: true          # Enable for GPU training
         persistent_workers: true  # Maintain workers between epochs
         shuffle: true             # Whether to shuffle training data
+        split_ratios: [0.7, 0.15, 0.15]     # Train, Val, Test
 
     tokenizer:
         tokenizer_path: "tokenizer_state_xc40.txt"
