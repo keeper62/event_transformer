@@ -374,8 +374,7 @@ class TransformerLightning(pl.LightningModule):
         # Important classes setup
         if important_classes is not None:
             self.important_classes = important_classes.long()
-            self._logger.debug(f"Important classes received: {self.important_classes.shape} "
-                            f"(min: {self.important_classes.min()}, max: {self.important_classes.max()})")
+            self._logger.debug(f"Important classes received: {self.important_classes.shape} ")
         else:
             self.important_classes = torch.tensor([], dtype=torch.long)
             self._logger.debug("No important classes specified")
