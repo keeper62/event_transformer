@@ -143,7 +143,8 @@ class MultiHeadDenseCollaboration(BaseAttention):
         attn_scores = attn_scores.reshape(B, T, self.heads, -1).transpose(1, 2)
         
         if mask:
-            attn_scores = self._apply_attention_mask(attn_scores)
+            causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).triu(diagonal=1)
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
         
         # Compute final output
         attn_weights = F.softmax(attn_scores, dim=-1)
@@ -184,7 +185,8 @@ class CollaborativeAttention(BaseAttention):
         attn_scores += content_bias
         
         if mask:
-            attn_scores = self._apply_attention_mask(attn_scores)
+            causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).triu(diagonal=1)
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
         
         # Compute final output
         attn_weights = F.softmax(attn_scores, dim=-1)
