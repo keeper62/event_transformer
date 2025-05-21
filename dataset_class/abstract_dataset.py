@@ -29,10 +29,8 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     return logger
 
 class AbstractBGLDataset(Dataset, ABC):
-    def __init__(self, path, context_length, template_miner=None, tokenizer=None, test_mode=False):
+    def __init__(self, path, context_length, test_mode=False):
         self.path = path
-        self.template_miner = template_miner
-        self.tokenizer = tokenizer
         self.context_length = context_length
         self.test_mode = test_mode
         

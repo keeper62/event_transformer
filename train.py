@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from models import load_config
+from models import load_config, LogTemplateMiner, LogTokenizer
 from training import DataModule, TransformerLightning
 
 def setup_logger(name: str | None = None) -> logging.Logger:
@@ -49,6 +49,18 @@ def setup_environment(seed: int = 42) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     sys.path.append(os.path.abspath("."))
     torch.set_float32_matmul_precision('medium')
+
+def log_device_info():
+    """Log comprehensive device and environment information"""
+    logger.info("===== Environment Configuration =====")
+    logger.info(f"PyTorch Lightning v{pl.__version__}")
+    logger.info(f"PyTorch v{torch.__version__}")
+    logger.info(f"CUDA Available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        logger.info(f"Current Device: {torch.cuda.current_device()}")
+        logger.info(f"Device Name: {torch.cuda.get_device_name(0)}")
+    logger.info(f"Num CPUs: {os.cpu_count()}")
+    logger.info("====================================")
 
 def get_callbacks(config: Dict[str, Any], config_name: str, test_mode: bool = False) -> list:
     """Create and return a list of callbacks for the trainer."""
@@ -93,16 +105,31 @@ def train_with_config(
     test_mode: bool = False
 ) -> None:
     """Train the model with the given configuration."""
+    log_device_info()
+    
     try:
         # Initialize data module
         logger.debug("Initializing DataModule")
         data_module = DataModule(config, test_mode=test_mode)
         
+        # Initialize components
+        logger.debug("Initializing LogTemplateMiner...")
+        template_miner = LogTemplateMiner(config['dataset']['drain_path'])
+            
+        logger.debug("Loading template miner state...")
+        template_miner.load_state()
+            
+        logger.debug("Initializing LogTokenizer...")
+        tokenizer = LogTokenizer(
+            config['tokenizer']['tokenizer_length'], 
+            tokenizer_path=config['tokenizer']['tokenizer_path']
+        )
+        
         # Get vocabulary sizes
-        config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
+        config['model']['vocab_size'] = template_miner.get_vocab_size()
         logger.debug(f"Vocab size template miner: {config['model']['vocab_size']}")
         
-        config['tokenizer']['vocab_size'] = data_module.tokenizer.get_vocab_size()
+        config['tokenizer']['vocab_size'] = tokenizer.get_vocab_size()
         logger.debug(f"Vocab size tokenizer: {config['tokenizer']['vocab_size']} samples")
         
         # Initialize model
@@ -119,7 +146,7 @@ def train_with_config(
         
         # Initialize trainer
         trainer = pl.Trainer(
-            max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
+            max_epochs=config['training'].get('num_epochs', 10),
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,

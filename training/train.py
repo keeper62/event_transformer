@@ -3,7 +3,7 @@ import importlib
 from typing import Optional, Dict, Any, Tuple
 import logging
 
-from models import Transformer, LogTemplateMiner, LogTokenizer
+from models import Transformer
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
@@ -223,24 +223,8 @@ class DataModule(pl.LightningDataModule):
         
         self._logger = setup_logger(self.__class__.__name__)
         self._logger.debug(f"Initializing DataModule with config: {config}")
-        
-        # Log device info early
-        self._log_device_info()
-        
-        try:
-            # Initialize components
-            self._logger.debug("Initializing LogTemplateMiner...")
-            self.template_miner = LogTemplateMiner(config['dataset']['drain_path'])
-            
-            self._logger.debug("Loading template miner state...")
-            self.template_miner.load_state()
-            
-            self._logger.debug("Initializing LogTokenizer...")
-            self.tokenizer = LogTokenizer(
-                config['tokenizer']['tokenizer_length'], 
-                tokenizer_path=config['tokenizer']['tokenizer_path']
-            )
-            
+
+        try:            
             # Dynamic dataset class loading
             self._logger.debug(f"Loading dataset class: {config['dataset']['class']}")
             dataset_module = importlib.import_module(f"dataset_class.{config['dataset']['class']}")
@@ -250,18 +234,6 @@ class DataModule(pl.LightningDataModule):
         except Exception as e:
             self._logger.error(f"Initialization failed: {str(e)}", exc_info=True)
             raise
-
-    def _log_device_info(self):
-        """Log comprehensive device and environment information"""
-        self._logger.info("===== Environment Configuration =====")
-        self._logger.info(f"PyTorch Lightning v{pl.__version__}")
-        self._logger.info(f"PyTorch v{torch.__version__}")
-        self._logger.info(f"CUDA Available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            self._logger.info(f"Current Device: {torch.cuda.current_device()}")
-            self._logger.info(f"Device Name: {torch.cuda.get_device_name(0)}")
-        self._logger.info(f"Num CPUs: {os.cpu_count()}")
-        self._logger.info("====================================")
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Initialize datasets for each stage with detailed logging"""
@@ -277,8 +249,6 @@ class DataModule(pl.LightningDataModule):
             full_dataset = self.dataset_class(
                 path=self.config['dataset']['path'],
                 context_length=self.config['model']['context_length'],
-                template_miner=self.template_miner.transform,
-                tokenizer=self.tokenizer.transform,
                 test_mode=self.test_mode
             )
             self._logger.info(f"Full dataset created with {len(full_dataset)} samples")
@@ -339,9 +309,8 @@ class DataModule(pl.LightningDataModule):
                     f"Output window length {len(output_window)} != prediction_length {self.config['model']['context_length']}"
                 
                 # Validate value ranges
-                if hasattr(self.tokenizer, 'vocab_size'):
-                    assert output_window.max() < self.tokenizer.vocab_size, \
-                        f"Output contains invalid token indices (max: {output_window.max()}, vocab size: {self.tokenizer.vocab_size})"
+                assert output_window.max() < self.config['model']['vocab_size'], \
+                    f"Output contains invalid token indices (max: {output_window.max()}, vocab size: {self.config['model']['vocab_size']})"
                 
             self._logger.debug(f"Dataset validation passed for {sample_count} samples")
             
@@ -457,6 +426,7 @@ class TransformerLightning(pl.LightningModule):
         base_metrics = {
             "acc": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes),
             "top5": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes, top_k=5),
+            "preplexity": torchmetrics.Perplexity()
         }
         
         # Training metrics
