@@ -369,8 +369,7 @@ class TransformerLightning(pl.LightningModule):
         self._logger.debug(f"Creating Transformer with config: {config['model']}")
         self.model = Transformer(config)
         self.num_classes = config['model']['vocab_size']
-        self.seq_len = config['model'].get('seq_len', 512)  # Assuming fixed sequence length
-        self._logger.info(f"Model initialized with num_classes: {self.num_classes}, seq_len: {self.seq_len}")
+        self._logger.info(f"Model initialized with num_classes: {self.num_classes}")
         
         # Important classes setup
         if important_classes is not None:
