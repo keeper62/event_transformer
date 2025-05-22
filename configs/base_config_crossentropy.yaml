@@ -1,0 +1,85 @@
+base_config:
+    # Environment settings
+    device: "auto"  # Can be "auto", "cpu", "cuda", etc.
+    seed: 42        # Random seed for reproducibility
+
+    # Model Hyperparameters
+    model:
+        loss_fn: "crossentropy"
+        vocab_size:
+        embed_dim: 512
+        num_heads: 8
+        num_layers: 6
+        ffn_dim: 2048
+        max_len: 512
+        context_length: 64            # The # steps in the past as input
+        dropout: 0.1
+        activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
+
+        # Bias specific which are the sentence meanings
+        bias_injection: null        # Options: "attention", "ffn", null
+
+        pre_norm: false       # Whether to use LayerNorm before FFN
+
+        gradient_checkpointing: true
+
+        layer_norm_eps: 1.0e-5
+
+        mixed_precision: true     # Enable AMP (Automatic Mixed Precision)
+
+
+    # Training Parameters
+    training:
+        num_epochs: 32
+        batch_size: 128
+        min_lr: 1.0e-6
+        lr_factor: 0.1
+        lr_patience: 3
+        weight_decay: 0.01       # L2 regularization
+        log_interval: 50         # Log every N steps
+        overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
+
+        # Checkpointing
+        save_top_k: 3           # Save top k checkpoints
+        monitor: "val/loss"     # Metric to monitor for checkpointing
+        
+        # Early stopping (optional)
+        early_stopping:
+            enabled: true       # Set to true to enable early stopping
+            patience: 3          # Number of epochs to wait before stopping
+            min_delta: 0.001     # Minimum change to qualify as improvement
+
+    # Attention Parameters
+    attention:
+        qkv_bias: false          # Whether to use bias in QKV projections
+        out_bias: true           # Whether to use bias in output projection
+        memory_efficient: true   # Use memory-efficient attention
+        chunk_size: 32          # Sequence chunk size for memory efficiency
+        inter_head_dim: 128       # Intermediate dimension for head collaboration
+        attention_dropout: 0.1   # Dropout for attention weights
+
+    # Positional Encoding
+    position:
+        ape_class: "PositionalEncoding"  # Options: PositionalEncoding, LearnableAbsolutePosition
+        max_len: 64
+
+    # Decoder Settings
+    decoder:
+        decoder_class: "CollaborativeAttention"  # Options: MultiHeadAttention, MultiHeadDenseCollaboration, CollaborativeAttention
+
+    # Dataset Settings
+    dataset:
+        name: "xc40"
+        path: "data/xc40.log"
+        class: "xc40_dataset"     # Dataset class name
+        drain_path: "drain3_state_xc40_old.bin"
+        num_workers: 2            # DataLoader workers
+        pin_memory: true          # Enable for GPU training
+        persistent_workers: true  # Maintain workers between epochs
+        shuffle: true             # Whether to shuffle training data
+        split_ratios: [0.7, 0.15, 0.15]     # Train, Val, Test
+
+    tokenizer:
+        tokenizer_path: "tokenizer_state_xc40.txt"
+        tokenizer_length: 64  # Maximum sequence length for tokenization
+        vocab_size:
