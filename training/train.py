@@ -10,6 +10,7 @@ import pytorch_lightning as pl
 
 import torch.nn as nn
 import torch.nn.functional as F
+from focal_loss.focal_loss import FocalLoss
 
 import os
 
@@ -156,62 +157,6 @@ class RougeL(torchmetrics.Metric):
         recall = self.lcs_sum / self.target_len_sum.clamp(min=1e-6)
         f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
         return torch.clamp(f1, 0, 1)
-
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2, alpha=None, reduction='mean'):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-        self._logger = setup_logger(self.__class__.__name__)
-
-    def forward(self, inputs, targets):
-        # Ensure tensors are on same device
-        targets = targets.to(inputs.device)
-        
-        # Flatten if needed
-        if inputs.dim() == 3:
-            inputs = inputs.reshape(-1, inputs.size(-1))
-            targets = targets.reshape(-1)
-
-        # Debug shapes and device
-        self._logger.debug(f"FocalLoss - inputs: {inputs.shape} ({inputs.device}), "
-                         f"targets: {targets.shape} ({targets.device})")
-
-        # Validate targets
-        if (targets < 0).any():
-            self._logger.warning(f"Negative targets detected: {targets[targets < 0]}")
-            targets = targets.clamp(min=0)
-            
-        # Compute log softmax
-        log_probs = F.log_softmax(inputs, dim=1)
-        
-        # Safe gather with bounds checking
-        if self.alpha is not None:
-            alpha = self.alpha.to(inputs.device)
-            max_idx = alpha.size(0) - 1
-            targets = targets.clamp(0, max_idx)
-            
-        # Get log probability of true class
-        log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        pt = log_pt.exp()
-        
-        # Compute focal term
-        focal_term = (1 - pt) ** self.gamma
-        
-        # Apply class weights if provided
-        if self.alpha is not None:
-            alpha_t = alpha.gather(0, targets)
-            focal_term = alpha_t * focal_term
-        
-        # Final loss
-        loss = -focal_term * log_pt
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
 
 class DataModule(pl.LightningDataModule):
     def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger=None):
@@ -441,7 +386,11 @@ class TransformerLightning(pl.LightningModule):
             )
         elif config['model'].get('loss_fn', 'focal') == "crossentropy":
             self._logger.debug("Initializing Cross-entropyloss")
-            self.loss_fn = nn.CrossEntropyLoss(reduction="mean")
+            self.loss_fn = FocalLoss(
+                #alpha=self.class_weights,
+                gamma=0,
+                reduction='mean'
+            )
         
         self._logger.info("Loss function initialized successfully")
         
@@ -486,12 +435,11 @@ class TransformerLightning(pl.LightningModule):
     def _process_batch(self, batch):
         inputs, targets, sequences = batch
         logits = self.model(inputs, sequences)
-        logits = logits.half()  # Use mixed precision
-        return logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)
+        return logits.view(-1, logits.size(-1)), targets.view(-1)                   
 
     def training_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(logits, targets)
+        loss = self.loss_fn(torch.nn.functional.softmax(logits, dim=-1), targets)
         
         # Update and log metrics
         metrics = self.train_metrics(logits, targets)
@@ -502,7 +450,7 @@ class TransformerLightning(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(logits, targets)
+        loss = self.loss_fn(torch.nn.functional.softmax(logits, dim=-1), targets)
         
         # Update metrics
         self.val_metrics.update(logits, targets)
@@ -518,7 +466,7 @@ class TransformerLightning(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(logits, targets)
+        loss = self.loss_fn(torch.nn.functional.softmax(logits, dim=-1), targets)
         
         # Update test metrics
         self.test_metrics.update(logits, targets)
