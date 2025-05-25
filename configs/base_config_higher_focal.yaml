@@ -37,7 +37,7 @@ base_config:
         weight_decay: 0.01       # L2 regularization
         log_interval: 50         # Log every N steps
         overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
-        focal_gamma: 0
+        focal_gamma: 2
 
         # Checkpointing
         save_top_k: 3           # Save top k checkpoints
