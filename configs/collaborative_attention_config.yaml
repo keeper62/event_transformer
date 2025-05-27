@@ -16,7 +16,7 @@ base_config:
         activation: "gelu"       # Activation function (gelu, relu, silu, etc.)
 
         # Bias specific which are the sentence meanings
-        bias_injection: "attention"        # Options: "attention", "ffn", null
+        bias_injection: null        # Options: "attention", "ffn", null
 
         pre_norm: false       # Whether to use LayerNorm before FFN
 
@@ -37,6 +37,7 @@ base_config:
         weight_decay: 0.01       # L2 regularization
         log_interval: 50         # Log every N steps
         overfit_batches: 0       # Set to >0 to overfit on small batch for debugging
+        focal_gamma: 0
 
         # Checkpointing
         save_top_k: 3           # Save top k checkpoints
@@ -71,14 +72,14 @@ base_config:
         name: "xc40"
         path: "data/xc40.log"
         class: "xc40_dataset"     # Dataset class name
-        drain_path: "drain3_state_xc40_old.bin"
-        num_workers: 2            # DataLoader workers
+        drain_path: "states/drain3_state_xc40_old.bin"
+        num_workers: 4            # DataLoader workers
         pin_memory: true          # Enable for GPU training
         persistent_workers: true  # Maintain workers between epochs
         shuffle: true             # Whether to shuffle training data
         split_ratios: [0.7, 0.15, 0.15]     # Train, Val, Test
 
     tokenizer:
-        tokenizer_path: "tokenizer_state_xc40.txt"
+        tokenizer_path: "states/tokenizer_state_xc40.txt"
         tokenizer_length: 64  # Maximum sequence length for tokenization
         vocab_size:

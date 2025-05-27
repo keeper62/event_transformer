@@ -71,14 +71,14 @@ base_config:
         name: "xc40"
         path: "data/xc40.log"
         class: "xc40_dataset"     # Dataset class name
-        drain_path: "drain3_state_xc40_old.bin"
-        num_workers: 2            # DataLoader workers
+        drain_path: "states/drain3_state_xc40_old.bin"
+        num_workers: 4            # DataLoader workers
         pin_memory: true          # Enable for GPU training
         persistent_workers: true  # Maintain workers between epochs
         shuffle: true             # Whether to shuffle training data
         split_ratios: [0.7, 0.15, 0.15]     # Train, Val, Test
 
     tokenizer:
-        tokenizer_path: "tokenizer_state_xc40.txt"
+        tokenizer_path: "states/tokenizer_state_xc40.txt"
         tokenizer_length: 64  # Maximum sequence length for tokenization
         vocab_size:

@@ -65,6 +65,7 @@ class LogTokenizer:
         
         if tokenizer_path and os.path.exists(tokenizer_path):
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
+            self.trained = True
         else:
             # Initialize for incremental training
             self.tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
