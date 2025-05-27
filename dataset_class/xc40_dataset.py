@@ -1,7 +1,7 @@
-from .abstract_dataset import AbstractBGLDataset
+from .abstract_dataset import AbstractMultiHostDataset
 from collections import defaultdict
 
-class Dataset(AbstractBGLDataset):
+class Dataset(AbstractMultiHostDataset):
     def _read_data(self, path):
         """
         Reads pre-sorted log file with format:

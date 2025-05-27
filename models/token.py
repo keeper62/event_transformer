@@ -2,6 +2,7 @@ from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 import os
 from drain3 import TemplateMiner
 from drain3.file_persistence import FilePersistence
+from collections import defaultdict
 
 class LogTemplateMiner:
     def __init__(self, state_path):
@@ -57,21 +58,58 @@ class LogTokenizer:
     def __init__(self, tokenizer_length, tokenizer_path=None, vocab_size=30522):
         """
         Initializes the tokenizer. If a path is provided, it loads an existing tokenizer.
-        Otherwise, it creates a new tokenizer.
+        Otherwise, it creates a new tokenizer with incremental training capability.
         """
+        self.tokenizer_length = tokenizer_length
+        self.vocab_size = vocab_size
+        
         if tokenizer_path and os.path.exists(tokenizer_path):
             self.tokenizer = Tokenizer.from_file(tokenizer_path)
         else:
-            # Start a new WordLevel tokenizer
-            self.tokenizer = Tokenizer(models.WordLevel(unk_token="#"))
+            # Initialize for incremental training
+            self.tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
             self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-            self.vocab_size = vocab_size
-        self.tokenizer_length = tokenizer_length
+            self.word_counts = defaultdict(int)
+            self.special_tokens = ["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"]
+            self.trained = False
 
-    def train(self, texts):
-        """Trains the tokenizer on a list of texts."""
-        trainer = trainers.WordLevelTrainer(vocab_size=self.vocab_size, special_tokens=["[UNK]"])
-        self.tokenizer.train_from_iterator(texts, trainer)
+    def train(self, words):
+        """Accumulate word counts for training"""
+        if isinstance(words, str):
+            words = words.split()
+            
+        for word in words:
+            self.word_counts[word] += 1
+
+    def _finalize_training(self):
+        """Finalize the tokenizer after accumulating all words"""
+        if self.trained:
+            return
+            
+        # Sort by frequency and take top words
+        sorted_words = sorted(self.word_counts.items(), 
+                            key=lambda x: (-x[1], x[0]))
+        
+        # Keep most frequent words
+        vocab = [word for word, count in sorted_words][:self.vocab_size - len(self.special_tokens)]
+        
+        # Add special tokens
+        vocab = self.special_tokens + vocab
+        
+        # Create the final vocabulary
+        self.tokenizer.model = models.WordLevel(
+            vocab={word: i for i, word in enumerate(vocab)},
+            unk_token="[UNK]"
+        )
+        
+        # Initialize trainer (needed for save/load compatibility)
+        self.tokenizer.trainer = trainers.WordLevelTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=self.special_tokens
+        )
+        
+        self.trained = True
+        del self.word_counts  # Free memory
 
     def pads(self, ids):
         """Pads the token IDs to a specified maximum length."""
@@ -83,10 +121,14 @@ class LogTokenizer:
 
     def transform(self, text):
         """Tokenizes and encodes the text into token IDs."""
+        if not self.trained:
+            self._finalize_training()
         return self.pads(self.tokenizer.encode(text).ids)
         
     def batch_transform(self, texts):
         """Tokenizes and encodes a batch of texts into token IDs."""
+        if not self.trained:
+            self._finalize_training()
         return [self.transform(text) for text in texts]
 
     def decode(self, ids):
@@ -95,12 +137,18 @@ class LogTokenizer:
 
     def get_vocab_size(self):
         """Returns the vocabulary size."""
+        if not self.trained:
+            self._finalize_training()
         return len(self.tokenizer.get_vocab())
 
     def get_vocab(self):
         """Returns the vocabulary dictionary."""
+        if not self.trained:
+            self._finalize_training()
         return self.tokenizer.get_vocab()
 
     def save(self, path):
         """Saves the tokenizer to a file."""
+        if not self.trained:
+            self._finalize_training()
         self.tokenizer.save(path)

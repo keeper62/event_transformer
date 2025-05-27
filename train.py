@@ -39,7 +39,7 @@ def setup_logger(name: str | None = None) -> logging.Logger:
 # Usage:
 logger = setup_logger(__name__)
 
-important_errors = torch.tensor([42, 101, 567, 1423, 3500, 4582], dtype=torch.long)
+important_errors = torch.tensor([42, 101], dtype=torch.long)
 
 def setup_environment(seed: int = 42) -> None:
     """Set up the training environment with reproducibility."""
@@ -123,7 +123,7 @@ def train_with_config(
             devices=num_accelerators,
             accelerator=accelerator,
             num_nodes=num_nodes,
-            strategy='ddp_find_unused_parameters_true',
+            strategy='ddp_find_unused_parameters_true' if accelerator=='gpu' else 'auto',
             logger=logger_obj,
             callbacks=callbacks,
             gradient_clip_val=config['training'].get('gradient_clip_val', None),

@@ -156,14 +156,19 @@ class MultiHeadDenseCollaboration(BaseAttention):
 
 
 class CollaborativeAttention(BaseAttention):
-    """Collaborative attention with learned mixing between heads."""
+    """Collaborative attention with learned mixing across all heads for q, k, v."""
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.mixing = nn.Parameter(torch.eye(self.heads, self.head_dim))
+        # Separate mixing matrices for q, k, v
+        self.mixing_q = nn.Parameter(torch.eye(self.heads, self.head_dim))
+        self.mixing_k = nn.Parameter(torch.eye(self.heads, self.head_dim))
+        self.mixing_v = nn.Parameter(torch.eye(self.heads, self.head_dim))
         self.content_bias = nn.Linear(self.dim, self.heads, bias=False)
         
         # Initialize parameters
-        nn.init.xavier_uniform_(self.mixing)
+        nn.init.xavier_uniform_(self.mixing_q)
+        nn.init.xavier_uniform_(self.mixing_k)
+        nn.init.xavier_uniform_(self.mixing_v)
         nn.init.xavier_uniform_(self.content_bias.weight)
 
     def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
@@ -173,14 +178,16 @@ class CollaborativeAttention(BaseAttention):
         qkv = self.qkv(x).reshape(B, T, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         
-        # Apply learned mixing to queries
-        mixed_q = torch.einsum('bhnd,hd->bhnd', q, self.mixing)
+        # Apply learned mixing to q, k, v
+        mixed_q = torch.einsum('bhnd,hd->bhnd', q, self.mixing_q)  # [B, heads, T, head_dim]
+        mixed_k = torch.einsum('bhnd,hd->bhnd', k, self.mixing_k)
+        mixed_v = torch.einsum('bhnd,hd->bhnd', v, self.mixing_v)
         
         # Compute attention scores
-        attn_scores = torch.matmul(mixed_q, k.transpose(-2, -1)) * self.scale
+        attn_scores = torch.matmul(mixed_q, mixed_k.transpose(-2, -1)) * self.scale
         
-        # Add content-based bias
-        k_reshaped = k.permute(0, 2, 1, 3).reshape(B, T, -1)
+        # Add content-based bias (computed from mixed keys)
+        k_reshaped = mixed_k.permute(0, 2, 1, 3).reshape(B, T, -1)
         content_bias = self.content_bias(k_reshaped).transpose(-1, -2).unsqueeze(-2)
         attn_scores += content_bias
         
@@ -191,7 +198,7 @@ class CollaborativeAttention(BaseAttention):
         # Compute final output
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        out = torch.matmul(attn_weights, v)
+        out = torch.matmul(attn_weights, mixed_v)  # Use mixed_v here
         out = out.transpose(1, 2).reshape(B, T, -1)
         
         return self.out_proj(out)

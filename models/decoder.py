@@ -82,7 +82,8 @@ class TransformerDecoderLayer(nn.Module):
         """Implementation of forward pass."""
         embed_bias = None
         if self.model_cfg['bias_injection'] is not None:
-            embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)
+            # Take the mean to prevent bias magnitude to grow with sequence length
+            embed_bias = self.bias_proj(self.template_embed(sequences)).mean(dim=-2) / len(sequences)
         
         # Self-attention
         x = self._forward_sublayer(
