@@ -418,7 +418,7 @@ class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: Optional[str] = None, 
                 important_classes: torch.Tensor | None = None):
         super().__init__()
-        self.save_hyperparameters(ignore=['class_weights'])
+        self.save_hyperparameters('config', 'config_name', 'important_classes')
         
         self.inference_times = []
         self.batch_sizes = []
@@ -517,6 +517,33 @@ class TransformerLightning(pl.LightningModule):
         
         # Test metrics
         self.test_metrics = self.val_metrics.clone(prefix="test/")
+        
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        map_location: Any = None,
+        hparams_file: Optional[str] = None,
+        strict: bool = True,
+        **kwargs
+    ):
+        """
+        Custom implementation to ensure proper loading of all components.
+        The kwargs will override any parameters saved in the checkpoint.
+        """
+        model = super().load_from_checkpoint(
+            checkpoint_path=checkpoint_path,
+            map_location=map_location,
+            hparams_file=hparams_file,
+            strict=strict,
+            **kwargs
+        )
+        
+        # Reinitialize any transient state that wasn't saved
+        model.inference_times = []
+        model.batch_sizes = []
+        
+        return model
 
     def _process_batch(self, batch):
         inputs, targets, sequences = batch

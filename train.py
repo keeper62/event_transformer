@@ -153,12 +153,7 @@ def train_with_config(
             precision='16-mixed',
         )
         
-        # Handle testing based on available checkpoints
-        checkpoint_callback = next(
-            (cb for cb in callbacks if isinstance(cb, ModelCheckpoint)), 
-            None
-        )
-        
+        # Handle testing
         if test_mode:
             logger.info("Running in test mode")
             test_trainer.test(model=model, datamodule=data_module)
@@ -170,10 +165,22 @@ def train_with_config(
             train_trainer.save_checkpoint(str(model_path))
             logger.info(f"Final model saved to {model_path}")
             
-            # Determine which model to test
+            # Get the best checkpoint path if available
+            checkpoint_callback = next(
+                (cb for cb in callbacks if isinstance(cb, ModelCheckpoint)), 
+                None
+            )
+            
             if checkpoint_callback and checkpoint_callback.best_model_path:
                 logger.info(f"Testing with best checkpoint: {checkpoint_callback.best_model_path}")
-                test_trainer.test(ckpt_path=checkpoint_callback.best_model_path, datamodule=data_module)
+                # Need to load model from checkpoint first
+                best_model = TransformerLightning.load_from_checkpoint(
+                    checkpoint_callback.best_model_path,
+                    config=config,
+                    config_name=config_name,
+                    important_classes=important_errors
+                )
+                test_trainer.test(model=best_model, datamodule=data_module)
             else:
                 logger.info("No best checkpoint found, testing with final model")
                 test_trainer.test(model=model, datamodule=data_module)
