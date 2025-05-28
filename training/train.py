@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 
 import torch.nn as nn
 import torch.nn.functional as F
-#from focal_loss.focal_loss import FocalLoss
+import time
 
 import os
 
@@ -198,16 +198,11 @@ class RougeL(torchmetrics.Metric):
         """
         preds = preds.argmax(dim=-1)  # Convert to predictions
         
-        # Process each sequence in batch
-        for pred, target in zip(preds, targets):
-            pred = pred[pred != -100]  # Remove padding if needed
-            target = target[target != -100]
-            
-            lcs_len = self._lightning_lcs(pred, target)
-            self.lcs_sum += lcs_len
-            self.pred_len_sum += len(pred)
-            self.target_len_sum += len(target)
-            self.total += 1
+        preds = preds[preds != -100]  # Remove padding if needed
+        targets = targets[targets != -100]
+        
+        self.lcs_sum += self._lightning_lcs(preds, targets)
+        self.pred_len_sum += len(preds)
 
     # Keep all existing LCS implementation methods unchanged
     def _lightning_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -218,49 +213,33 @@ class RougeL(torchmetrics.Metric):
         if torch.equal(a, b):
             return torch.tensor(len(a), device=a.device)
         
-        min_len = min(len(a), len(b))
-        if torch.equal(a[:min_len], b[:min_len]) or torch.equal(a[-min_len:], b[-min_len:]):
-            return torch.tensor(min_len, device=a.device)
-        
-        if self._content_similarity(a, b) >= self.fast_threshold:
-            return torch.tensor(min_len, device=a.device)
-        
-        return self._exact_lcs(a, b) if self.exact_mode else self._approx_lcs(a, b)
+        return self._gpu_lcs(a, b)
 
-    def _content_similarity(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        unique_match = torch.isin(a.unique(), b.unique()).float().mean()
-        len_ratio = min(len(a), len(b)) / max(len(a), len(b))
-        return (unique_match + len_ratio) / 2
-
-    def _approx_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        a_vals, a_counts = torch.unique(a, return_counts=True)
-        b_vals, b_counts = torch.unique(b, return_counts=True)
+    def _gpu_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # Create a hash map of token positions in `b`
+        b_positions = {}
+        for idx, token in enumerate(b):
+            if token not in b_positions:
+                b_positions[token] = []
+            b_positions[token].append(idx)
         
-        common = torch.isin(a_vals, b_vals)
-        matched = torch.minimum(a_counts[common], b_counts[torch.isin(b_vals, a_vals[common])])
-        return matched.sum().float()
-
-    def _exact_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        m, n = len(a), len(b)
-        if m == 0 or n == 0:
-            return torch.tensor(0.0, device=a.device)
+        # Greedy LCS approximation
+        lcs = 0
+        last_b_pos = -1
         
-        dp = torch.zeros(2, n+1, dtype=torch.long, device=a.device)
-        
-        for i in range(1, m+1):
-            for j in range(1, n+1):
-                if a[i-1] == b[j-1]:
-                    dp[1, j] = dp[0, j-1] + 1
-                else:
-                    dp[1, j] = max(dp[0, j], dp[1, j-1])
-            dp[0] = dp[1].clone()
-        return dp[1, n].float()
+        for token in a:
+            if token in b_positions:
+                # Find the first occurrence in `b` after `last_b_pos`
+                for pos in b_positions[token]:
+                    if pos > last_b_pos:
+                        lcs += 1
+                        last_b_pos = pos
+                        break
+        return torch.tensor(lcs, device=a.device)
 
     def compute(self) -> torch.Tensor:
-        precision = self.lcs_sum / self.pred_len_sum.clamp(min=1e-6)
-        recall = self.lcs_sum / self.target_len_sum.clamp(min=1e-6)
-        f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
-        return torch.clamp(f1, 0, 1)
+        precision = self.lcs_sum.clamp(min=1e-6) / self.pred_len_sum.clamp(min=1e-6)
+        return torch.clamp(precision, 0, 1)
 
 class DataModule(pl.LightningDataModule):
     def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger=None):
@@ -441,6 +420,9 @@ class TransformerLightning(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
         
+        self.inference_times = []
+        self.batch_sizes = []
+        
         # Setup logger
         self._logger = setup_logger(self.__class__.__name__)
         self._logger.info("Initializing TransformerLightning model")
@@ -569,8 +551,18 @@ class TransformerLightning(pl.LightningModule):
         self.val_metrics.reset()
 
     def test_step(self, batch, batch_idx):
+        # Start timing
+        start_time = time.time()
+        
         logits, targets = self._process_batch(batch)
         loss = self.loss_fn(torch.nn.functional.softmax(logits, dim=-1), targets)
+        
+        # End timing
+        elapsed_time = time.time() - start_time
+        
+        # Store timing information
+        self.inference_times.append(elapsed_time)
+        self.batch_sizes.append(targets.size(0))  # Store batch size
         
         # Update test metrics
         self.test_metrics.update(logits, targets)
@@ -583,6 +575,37 @@ class TransformerLightning(pl.LightningModule):
         test_metrics = self.test_metrics.compute()
         self.log_dict(test_metrics, sync_dist=True)
         self.test_metrics.reset()
+        
+        # Calculate and log inference speed metrics
+        if len(self.inference_times) > 0:
+            total_time = sum(self.inference_times)
+            total_samples = sum(self.batch_sizes)
+            
+            avg_time_per_batch = total_time / len(self.inference_times)
+            avg_time_per_sample = total_time / total_samples
+            samples_per_second = total_samples / total_time
+            
+            self.log_dict({
+                "test/avg_inference_time_per_batch": avg_time_per_batch,
+                "test/avg_inference_time_per_sample": avg_time_per_sample,
+                "test/samples_per_second": samples_per_second,
+                "test/total_inference_time": total_time,
+                "test/total_samples_processed": total_samples,
+            }, sync_dist=True)
+            
+            # Log to console as well
+            self._logger.info(
+                f"Inference Speed Metrics:\n"
+                f"  Avg time per batch: {avg_time_per_batch:.4f}s\n"
+                f"  Avg time per sample: {avg_time_per_sample:.4f}s\n"
+                f"  Samples per second: {samples_per_second:.2f}\n"
+                f"  Total inference time: {total_time:.2f}s\n"
+                f"  Total samples processed: {total_samples}"
+            )
+        
+        # Reset timing records
+        self.inference_times = []
+        self.batch_sizes = []
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']
