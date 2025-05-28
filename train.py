@@ -89,7 +89,7 @@ def test_model(
     datamodule: pl.LightningDataModule,
     accelerator: str,
     logger_obj: Optional[pl.loggers.Logger] = None,
-    callbacks: Optional[List[pl.Callback]] = None
+    test_mode: bool = False,
 ) -> None:
     """Run standardized testing procedure for a model."""
     # Create testing trainer (uses only 1 device for consistent measurements)
@@ -99,12 +99,12 @@ def test_model(
         num_nodes=1,
         strategy='auto',
         logger=logger_obj,
-        callbacks=callbacks,
         deterministic=True,
         enable_progress_bar=True,
         precision='16-mixed',
+        fast_dev_run=test_mode
     )
-    
+
     logger.info("Starting model testing")
     test_trainer.test(model=model, datamodule=datamodule)
 
@@ -114,14 +114,12 @@ def train_with_config(
     num_accelerators: int,
     num_nodes: int,
     accelerator: str,
-    test_mode: bool = False
+    data_module,
+    logger_obj,
+    test_mode: bool = False,
 ) -> None:
     """Train the model with the given configuration."""
     try:
-        # Initialize data module
-        logger.debug("Initializing DataModule")
-        data_module = DataModule(config, test_mode=test_mode)
-        
         # Get vocabulary sizes
         config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
         logger.debug(f"Vocab size template miner: {config['model']['vocab_size']}")
@@ -138,11 +136,10 @@ def train_with_config(
         )
 
         # Configure logger and callbacks
-        logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
         callbacks = get_callbacks(config, config_name, test_mode)
         
         # Create training trainer (uses all devices)
-        train_trainer = pl.Trainer(
+        trainer = pl.Trainer(
             max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
             devices=num_accelerators,
             accelerator=accelerator,
@@ -162,35 +159,17 @@ def train_with_config(
         )
 
         logger.info(f"Starting training with config: {config_name}")
-        train_trainer.fit(model, datamodule=data_module)
+        trainer.fit(model, datamodule=data_module)
         
-        # Create testing trainer (uses only 1 device)
-        test_trainer = pl.Trainer(
-            devices=1,  # Force single device for testing
-            accelerator=accelerator,
-            num_nodes=1,
-            strategy='auto',  # Simple strategy for testing
-            logger=logger_obj,
-            callbacks=callbacks,
-            deterministic=True,
-            enable_progress_bar=True,  # Always show progress bar for testing
-            precision='16-mixed',
-        )
-        
-        # Handle testing
-        if test_mode:
-            logger.info("Running in test mode")
-            test_trainer.test(model=model, datamodule=data_module)
-        else:
+        if not test_mode:
             # Save final model
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)
             model_path = save_dir / f"trained_model_{config_name}_final.ckpt"
-            train_trainer.save_checkpoint(str(model_path))
+            trainer.save_checkpoint(str(model_path))
             logger.info(f"Final model saved to {model_path}")
             
-            logger.info("Starting testing with last model")
-            test_trainer.test(model=model, datamodule=data_module)
+        return model
 
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)
@@ -256,16 +235,32 @@ def main() -> None:
         logger.info(f"Training with configuration: {config_name}")
         logger.info(f"Arguments: {vars(args)}")
         
-        train_with_config(
+        # Initialize data module
+        logger.debug("Initializing DataModule")
+        data_module = DataModule(config['base_config'], test_mode=args.test_mode)
+        
+        logger_obj = TensorBoardLogger("logs/", name=config_name) if not args.test_mode else None
+        
+        model = train_with_config(
             config['base_config'], 
             config_name, 
             args.num_accelerators, 
             args.num_nodes, 
             args.accelerator, 
-            test_mode=args.test_mode
+            logger_obj=logger_obj,
+            test_mode=args.test_mode,
+            data_module=data_module
         )
         
         logger.info("Training completed successfully.")
+        
+        test_model(
+            model,
+            data_module,
+            args.accelerator,
+            logger_obj,
+            test_mode=args.test_mode
+        )
     except Exception as e:
         logger.error(f"Training failed: {str(e)}")
         sys.exit(1)
