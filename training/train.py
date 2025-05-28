@@ -180,67 +180,6 @@ class LightningNGramScore(torchmetrics.Metric):
         precisions = self.match_counts / self.total_counts.clamp(min=1)
         return torch.exp(torch.mean(torch.log(precisions)))
 
-class RougeL(torchmetrics.Metric):
-    def __init__(self, exact_mode=True, fast_threshold=0.9):
-        super().__init__()
-        self.exact_mode = exact_mode
-        self.fast_threshold = fast_threshold
-        
-        self.add_state("lcs_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("pred_len_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("target_len_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, targets: torch.Tensor):
-        """
-        preds: [batch_size, seq_len, vocab_size] logits
-        targets: [batch_size, seq_len] ground truth indices
-        """
-        preds = preds.argmax(dim=-1)  # Convert to predictions
-        
-        preds = preds[preds != -100]  # Remove padding if needed
-        targets = targets[targets != -100]
-        
-        self.lcs_sum += self._lightning_lcs(preds, targets)
-        self.pred_len_sum += len(preds)
-
-    # Keep all existing LCS implementation methods unchanged
-    def _lightning_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Optimized LCS pipeline with all speed tricks"""
-        if len(a) == 0 or len(b) == 0:
-            return torch.tensor(0.0, device=a.device)
-        
-        if torch.equal(a, b):
-            return torch.tensor(len(a), device=a.device)
-        
-        return self._gpu_lcs(a, b)
-
-    def _gpu_lcs(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        # Create a hash map of token positions in `b`
-        b_positions = {}
-        for idx, token in enumerate(b):
-            if token not in b_positions:
-                b_positions[token] = []
-            b_positions[token].append(idx)
-        
-        # Greedy LCS approximation
-        lcs = 0
-        last_b_pos = -1
-        
-        for token in a:
-            if token in b_positions:
-                # Find the first occurrence in `b` after `last_b_pos`
-                for pos in b_positions[token]:
-                    if pos > last_b_pos:
-                        lcs += 1
-                        last_b_pos = pos
-                        break
-        return torch.tensor(lcs, device=a.device)
-
-    def compute(self) -> torch.Tensor:
-        precision = self.lcs_sum.clamp(min=1e-6) / self.pred_len_sum.clamp(min=1e-6)
-        return torch.clamp(precision, 0, 1)
-
 class DataModule(pl.LightningDataModule):
     def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger=None):
         super().__init__()
@@ -499,7 +438,6 @@ class TransformerLightning(pl.LightningModule):
             {
                 **base_metrics,
                 "bleu": LightningNGramScore(ngram_size=4),
-                "rougeL": RougeL(),
             },
             prefix="val/"
         )
