@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 
 import torch.nn as nn
 import torch.nn.functional as F
-import time
+#from focal_loss.focal_loss import FocalLoss
 
 import os
 
@@ -317,15 +317,13 @@ class DataModule(pl.LightningDataModule):
             
             # Split dataset
             self._logger.debug("Splitting dataset...")
-            total_size = len(full_dataset)
-            train_size = int(self.split_ratios[0] * total_size)
-            val_size = int(self.split_ratios[1] * total_size)
-            test_size = total_size - train_size - val_size
+            train_size = 0.8 
+            val_size = 0.2
 
             # Split the dataset
-            self.train_dataset, self.val_dataset, self.test_dataset = random_split(
+            self.train_dataset, self.val_dataset = random_split(
                 full_dataset,
-                [train_size, val_size, test_size],
+                [train_size, val_size],
                 generator=torch.Generator().manual_seed(42)  # For reproducibility
             )
 
@@ -335,8 +333,6 @@ class DataModule(pl.LightningDataModule):
                 self._validate_dataset_shapes(self.train_dataset)
             if hasattr(self, 'val_dataset'):
                 self._validate_dataset_shapes(self.val_dataset)
-            if hasattr(self, 'test_dataset'):
-                self._validate_dataset_shapes(self.test_dataset)
                 
             self._setup_complete = True
             self._logger.info("Dataset setup completed successfully")
@@ -386,10 +382,6 @@ class DataModule(pl.LightningDataModule):
         self._logger.debug("Creating val DataLoader")
         return self._create_dataloader(self.val_dataset, shuffle=False)
 
-    def test_dataloader(self) -> DataLoader:
-        self._logger.debug("Creating test DataLoader")
-        return self._create_dataloader(self.test_dataset, shuffle=False)
-
     def _create_dataloader(self, dataset, shuffle: bool) -> DataLoader:
         """Centralized DataLoader creation with validation"""
         if dataset is None:
@@ -418,10 +410,7 @@ class TransformerLightning(pl.LightningModule):
     def __init__(self, config: Dict[str, Any], config_name: Optional[str] = None, 
                 important_classes: torch.Tensor | None = None):
         super().__init__()
-        self.save_hyperparameters('config', 'config_name', 'important_classes')
-        
-        self.inference_times = []
-        self.batch_sizes = []
+        self.save_hyperparameters(ignore=['class_weights'])
         
         # Setup logger
         self._logger = setup_logger(self.__class__.__name__)
@@ -514,36 +503,6 @@ class TransformerLightning(pl.LightningModule):
             },
             prefix="val/"
         )
-        
-        # Test metrics
-        self.test_metrics = self.val_metrics.clone(prefix="test/")
-        
-    @classmethod
-    def load_from_checkpoint(
-        cls,
-        checkpoint_path: str,
-        map_location: Any = None,
-        hparams_file: Optional[str] = None,
-        strict: bool = True,
-        **kwargs
-    ):
-        """
-        Custom implementation to ensure proper loading of all components.
-        The kwargs will override any parameters saved in the checkpoint.
-        """
-        model = super().load_from_checkpoint(
-            checkpoint_path=checkpoint_path,
-            map_location=map_location,
-            hparams_file=hparams_file,
-            strict=strict,
-            **kwargs
-        )
-        
-        # Reinitialize any transient state that wasn't saved
-        model.inference_times = []
-        model.batch_sizes = []
-        
-        return model
 
     def _process_batch(self, batch):
         inputs, targets, sequences = batch
@@ -576,63 +535,6 @@ class TransformerLightning(pl.LightningModule):
         val_metrics = self.val_metrics.compute()
         self.log_dict(val_metrics, sync_dist=True)
         self.val_metrics.reset()
-
-    def test_step(self, batch, batch_idx):
-        # Start timing
-        start_time = time.time()
-        
-        logits, targets = self._process_batch(batch)
-        loss = self.loss_fn(torch.nn.functional.softmax(logits, dim=-1), targets)
-        
-        # End timing
-        elapsed_time = time.time() - start_time
-        
-        # Store timing information
-        self.inference_times.append(elapsed_time)
-        self.batch_sizes.append(targets.size(0))  # Store batch size
-        
-        # Update test metrics
-        self.test_metrics.update(logits, targets)
-        self.log("test/loss", loss, on_epoch=True, sync_dist=True)
-        
-        return {"loss": loss, "preds": logits.argmax(dim=-1), "targets": targets}
-    
-    def on_test_epoch_end(self):
-        # Compute all test metrics
-        test_metrics = self.test_metrics.compute()
-        self.log_dict(test_metrics, sync_dist=True)
-        self.test_metrics.reset()
-        
-        # Calculate and log inference speed metrics
-        if len(self.inference_times) > 0:
-            total_time = sum(self.inference_times)
-            total_samples = sum(self.batch_sizes)
-            
-            avg_time_per_batch = total_time / len(self.inference_times)
-            avg_time_per_sample = total_time / total_samples
-            samples_per_second = total_samples / total_time
-            
-            self.log_dict({
-                "test/avg_inference_time_per_batch": avg_time_per_batch,
-                "test/avg_inference_time_per_sample": avg_time_per_sample,
-                "test/samples_per_second": samples_per_second,
-                "test/total_inference_time": total_time,
-                "test/total_samples_processed": total_samples,
-            }, sync_dist=True)
-            
-            # Log to console as well
-            self._logger.info(
-                f"Inference Speed Metrics:\n"
-                f"  Avg time per batch: {avg_time_per_batch:.4f}s\n"
-                f"  Avg time per sample: {avg_time_per_sample:.4f}s\n"
-                f"  Samples per second: {samples_per_second:.2f}\n"
-                f"  Total inference time: {total_time:.2f}s\n"
-                f"  Total samples processed: {total_samples}"
-            )
-        
-        # Reset timing records
-        self.inference_times = []
-        self.batch_sizes = []
             
     def configure_optimizers(self):
         training_cfg = self.hparams.config['training']

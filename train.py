@@ -3,7 +3,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 
 import torch
 import pytorch_lightning as pl
@@ -84,42 +84,21 @@ def get_callbacks(config: Dict[str, Any], config_name: str, test_mode: bool = Fa
     
     return callbacks
 
-def test_model(
-    model: pl.LightningModule,
-    datamodule: pl.LightningDataModule,
-    accelerator: str,
-    logger_obj: Optional[pl.loggers.Logger] = None,
-    test_mode: bool = False,
-) -> None:
-    """Run standardized testing procedure for a model."""
-    # Create testing trainer (uses only 1 device for consistent measurements)
-    test_trainer = pl.Trainer(
-        devices=1,
-        accelerator=accelerator,
-        num_nodes=1,
-        strategy='auto',
-        logger=logger_obj,
-        deterministic=True,
-        enable_progress_bar=True,
-        precision='16-mixed',
-        fast_dev_run=test_mode
-    )
-
-    logger.info("Starting model testing")
-    test_trainer.test(model=model, datamodule=datamodule)
-
 def train_with_config(
     config: Dict[str, Any],
     config_name: str,
     num_accelerators: int,
     num_nodes: int,
     accelerator: str,
-    data_module,
-    logger_obj,
-    test_mode: bool = False,
-) -> None:
-    """Train the model with the given configuration."""
+    test_mode: bool = False
+) -> Dict[str, Any]:
+    """Train the model with the given configuration.
+    """
     try:
+        # Initialize data module
+        logger.debug("Initializing DataModule")
+        data_module = DataModule(config, test_mode=test_mode)
+        
         # Get vocabulary sizes
         config['model']['vocab_size'] = data_module.template_miner.get_vocab_size()
         logger.debug(f"Vocab size template miner: {config['model']['vocab_size']}")
@@ -136,10 +115,11 @@ def train_with_config(
         )
 
         # Configure logger and callbacks
+        logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
         callbacks = get_callbacks(config, config_name, test_mode)
         
-        # Create training trainer (uses all devices)
-        trainer = pl.Trainer(
+        # Create training trainer
+        train_trainer = pl.Trainer(
             max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
             devices=num_accelerators,
             accelerator=accelerator,
@@ -159,73 +139,38 @@ def train_with_config(
         )
 
         logger.info(f"Starting training with config: {config_name}")
-        trainer.fit(model, datamodule=data_module)
+        train_trainer.fit(model, datamodule=data_module)
         
         if not test_mode:
-            # Save final model
+        # Save final model
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)
             model_path = save_dir / f"trained_model_{config_name}_final.ckpt"
-            trainer.save_checkpoint(str(model_path))
+            train_trainer.save_checkpoint(str(model_path))
             logger.info(f"Final model saved to {model_path}")
-            
-        return model
 
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)
         raise
 
 def main() -> None:
-    """Main function to parse arguments and start training."""
+    """Enhanced main function with better result handling."""
     parser = argparse.ArgumentParser(
         description="Train Transformer model with specified configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument(
-        "--config", 
-        type=str, 
-        default="configs/base_config.yaml", 
-        help="Path to the config file."
-    )
-    parser.add_argument(
-        "--num_nodes", 
-        type=int, 
-        default=1, 
-        help="Number of distributed nodes."
-    )
-    parser.add_argument(
-        "--accelerator", 
-        type=str, 
-        default="auto",  # Changed from "cpu" to "auto" for better flexibility
-        choices=["auto", "cpu", "gpu", "tpu"],
-        help="Which accelerator to use."
-    )
-    parser.add_argument(
-        "--num_accelerators", 
-        type=int, 
-        default=1, 
-        help="Number of GPUs or CPUs to use."
-    )
-    parser.add_argument(
-        "--test_mode", 
-        action="store_true", 
-        help="Enable test mode with a small dataset."
-    )
-    parser.add_argument(
-        "--debug", 
-        action="store_true", 
-        help="Enable debug mode with additional logging."
-    )
-    parser.add_argument(
-        "--notes",
-        type=str,
-        default="None"
-    )
+    parser.add_argument("--config", type=str, default="configs/base_config.yaml")
+    parser.add_argument("--num_nodes", type=int, default=1)
+    parser.add_argument("--accelerator", type=str, default="auto", choices=["auto", "cpu", "gpu", "tpu"])
+    parser.add_argument("--num_accelerators", type=int, default=1)
+    parser.add_argument("--test_mode", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--notes", type=str, default="None")
 
     args = parser.parse_args()
     
     if args.debug:
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
     
     setup_environment()
@@ -233,34 +178,18 @@ def main() -> None:
     try:
         config, config_name = load_config(args.config), Path(args.config).stem
         logger.info(f"Training with configuration: {config_name}")
-        logger.info(f"Arguments: {vars(args)}")
         
-        # Initialize data module
-        logger.debug("Initializing DataModule")
-        data_module = DataModule(config['base_config'], test_mode=args.test_mode)
-        
-        logger_obj = TensorBoardLogger("logs/", name=config_name) if not args.test_mode else None
-        
-        model = train_with_config(
+        train_with_config(
             config['base_config'], 
             config_name, 
             args.num_accelerators, 
             args.num_nodes, 
             args.accelerator, 
-            logger_obj=logger_obj,
-            test_mode=args.test_mode,
-            data_module=data_module
+            test_mode=args.test_mode
         )
         
         logger.info("Training completed successfully.")
         
-        test_model(
-            model,
-            data_module,
-            args.accelerator,
-            logger_obj,
-            test_mode=args.test_mode
-        )
     except Exception as e:
         logger.error(f"Training failed: {str(e)}")
         sys.exit(1)
