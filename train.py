@@ -117,8 +117,8 @@ def train_with_config(
         logger_obj = TensorBoardLogger("logs/", name=config_name) if not test_mode else None
         callbacks = get_callbacks(config, config_name, test_mode)
         
-        # Initialize trainer
-        trainer = pl.Trainer(
+        # Create training trainer (uses all devices)
+        train_trainer = pl.Trainer(
             max_epochs=1 if test_mode else config['training'].get('num_epochs', 10),
             devices=num_accelerators,
             accelerator=accelerator,
@@ -138,7 +138,20 @@ def train_with_config(
         )
 
         logger.info(f"Starting training with config: {config_name}")
-        trainer.fit(model, datamodule=data_module)
+        train_trainer.fit(model, datamodule=data_module)
+        
+        # Create testing trainer (uses only 1 device)
+        test_trainer = pl.Trainer(
+            devices=1,  # Force single device for testing
+            accelerator=accelerator,
+            num_nodes=1,
+            strategy='auto',  # Simple strategy for testing
+            logger=logger_obj,
+            callbacks=callbacks,
+            deterministic=True,
+            enable_progress_bar=True,  # Always show progress bar for testing
+            precision='16-mixed',
+        )
         
         # Handle testing based on available checkpoints
         checkpoint_callback = next(
@@ -148,22 +161,22 @@ def train_with_config(
         
         if test_mode:
             logger.info("Running in test mode")
-            trainer.test(model=model, datamodule=data_module)
+            test_trainer.test(model=model, datamodule=data_module)
         else:
             # Save final model
             save_dir = Path("saved_models")
             save_dir.mkdir(exist_ok=True)
             model_path = save_dir / f"trained_model_{config_name}_final.ckpt"
-            trainer.save_checkpoint(str(model_path))
+            train_trainer.save_checkpoint(str(model_path))
             logger.info(f"Final model saved to {model_path}")
             
             # Determine which model to test
             if checkpoint_callback and checkpoint_callback.best_model_path:
                 logger.info(f"Testing with best checkpoint: {checkpoint_callback.best_model_path}")
-                trainer.test(ckpt_path="best", datamodule=data_module)
+                test_trainer.test(ckpt_path=checkpoint_callback.best_model_path, datamodule=data_module)
             else:
                 logger.info("No best checkpoint found, testing with final model")
-                trainer.test(model=model, datamodule=data_module)
+                test_trainer.test(model=model, datamodule=data_module)
 
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)
@@ -209,6 +222,11 @@ def main() -> None:
         "--debug", 
         action="store_true", 
         help="Enable debug mode with additional logging."
+    )
+    parser.add_argument(
+        "--notes",
+        type=str,
+        default="None"
     )
 
     args = parser.parse_args()
