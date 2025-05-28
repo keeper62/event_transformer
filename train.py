@@ -3,7 +3,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 import torch
 import pytorch_lightning as pl
@@ -83,6 +83,30 @@ def get_callbacks(config: Dict[str, Any], config_name: str, test_mode: bool = Fa
         callbacks.append(early_stop_callback)
     
     return callbacks
+
+def test_model(
+    model: pl.LightningModule,
+    datamodule: pl.LightningDataModule,
+    accelerator: str,
+    logger_obj: Optional[pl.loggers.Logger] = None,
+    callbacks: Optional[List[pl.Callback]] = None
+) -> None:
+    """Run standardized testing procedure for a model."""
+    # Create testing trainer (uses only 1 device for consistent measurements)
+    test_trainer = pl.Trainer(
+        devices=1,
+        accelerator=accelerator,
+        num_nodes=1,
+        strategy='auto',
+        logger=logger_obj,
+        callbacks=callbacks,
+        deterministic=True,
+        enable_progress_bar=True,
+        precision='16-mixed',
+    )
+    
+    logger.info("Starting model testing")
+    test_trainer.test(model=model, datamodule=datamodule)
 
 def train_with_config(
     config: Dict[str, Any],
@@ -165,25 +189,8 @@ def train_with_config(
             train_trainer.save_checkpoint(str(model_path))
             logger.info(f"Final model saved to {model_path}")
             
-            # Get the best checkpoint path if available
-            checkpoint_callback = next(
-                (cb for cb in callbacks if isinstance(cb, ModelCheckpoint)), 
-                None
-            )
-            
-            if checkpoint_callback and checkpoint_callback.best_model_path:
-                logger.info(f"Testing with best checkpoint: {checkpoint_callback.best_model_path}")
-                # Need to load model from checkpoint first
-                best_model = TransformerLightning.load_from_checkpoint(
-                    checkpoint_callback.best_model_path,
-                    config=config,
-                    config_name=config_name,
-                    important_classes=important_errors
-                )
-                test_trainer.test(model=best_model, datamodule=data_module)
-            else:
-                logger.info("No best checkpoint found, testing with final model")
-                test_trainer.test(model=model, datamodule=data_module)
+            logger.info("Starting testing with last model")
+            test_trainer.test(model=model, datamodule=data_module)
 
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)
