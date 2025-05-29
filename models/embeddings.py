@@ -83,7 +83,7 @@ class Embeddings(nn.Module):
             x = self.token_embedding(x)  # (B, T) -> (B, T, D)
             
             if hasattr(self, 'template_embed'):
-                x = x + self.bias_scale * self.template_embed(sequences).mean(dim=2)
+                x = x + self.bias_scale * self.template_embed(sequences).sum(dim=2)
             
             # Positional embeddings
             if self.position_embedding is not None:
