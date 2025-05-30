@@ -25,8 +25,7 @@ class BaseAttention(nn.Module):
         self.dropout = nn.Dropout(model_cfg['dropout'])
         
         if model_cfg['bias_injection'] == "attention":
-            self.template_embed = nn.Embedding(config['tokenizer'].get('vocab_size', 64), self.dim)
-            self.bias_proj = nn.Linear(self.dim, 1)
+            self.template_embed = nn.Embedding(config['tokenizer'].get('vocab_size', 64), self.heads)
         
         # Initialize parameters
         self._init_parameters()
@@ -55,13 +54,9 @@ class BaseAttention(nn.Module):
             # Get (B, T_template, D)
             template_emb = self.template_embed(sequences)
             
-            # Project and mean over template tokens to get (B, D)
-            embed_bias = self.bias_proj(template_emb).mean(dim=1)  # dim=1 is token dim
+            bias = template_emb.permute(0, 3, 1, 2)
             
-            # Project embed_bias to a scalar per head or per sequence
-            # Simple scalar bias added to all attention scores
-            bias_scalar = embed_bias.mean(dim=1).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, 1)
-            attn_scores = attn_scores + bias_scalar
+            attn_scores = attn_scores + bias
         
         # Apply standard causal mask (upper triangular)
         if mask:
