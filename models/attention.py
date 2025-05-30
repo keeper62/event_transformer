@@ -97,27 +97,6 @@ class MultiHeadAttention(BaseAttention):
     """Standard multi-head attention with optional memory-efficient implementation."""
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        if config['attention'].get('memory_efficient', False):
-            self.forward = self._memory_efficient_forward
-
-    def _memory_efficient_forward(self, x: torch.Tensor, sequences: torch.Tensor, mask: bool = True, *args) -> torch.Tensor:
-        """Memory-efficient implementation using chunking."""
-        B, T, _ = x.shape
-        chunk_size = self.config['attention'].get('chunk_size', 256)
-        
-        # Process in chunks if sequence is long
-        if T <= chunk_size:
-            return super().forward(x, sequences, mask)
-            
-        # Split into chunks
-        chunks = x.split(chunk_size, dim=1)
-        sequence_chunks = sequences.split(chunk_size, dim=1)
-        outputs = []
-        
-        for chunk, seq_chunk in zip(chunks, sequence_chunks):
-            outputs.append(super().forward(chunk, seq_chunk, mask))
-            
-        return torch.cat(outputs, dim=1)
 
 class CollaborativeAttention(BaseAttention):
     """Collaborative attention with learned mixing across all heads for q, k, v."""
