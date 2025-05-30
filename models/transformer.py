@@ -69,7 +69,7 @@ class Transformer(nn.Module):
     def forward(self, x: torch.Tensor, sequences: List[List[int]]) -> torch.Tensor:
         """Forward pass with optional mixed precision."""
         with torch.amp.autocast(**self._autocast_kwargs):
-            x = self.embedding_layer(x, sequences)
+            x = self.embedding_layer(x)
             
             # Process through decoder layers
             for layer in self.decoder_layers:
@@ -78,7 +78,7 @@ class Transformer(nn.Module):
             return self.fc_out(x)
 
     @torch.no_grad()
-    def predict(self, x: torch.Tensor, sequences: List[List[int]], temperature: float = 1.0, top_k: Optional[int] = None) -> List[int]:
+    def predict(self, x: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None) -> List[int]:
         """
         Efficient prediction method with sampling options.
         
@@ -96,7 +96,7 @@ class Transformer(nn.Module):
             x = x.unsqueeze(0)
             
         # Get logits for last position only
-        logits = self.forward(x, sequences)[:, -1, :] / temperature
+        logits = self.forward(x)[:, -1, :] / temperature
         
         # Apply top-k filtering if specified
         if top_k is not None:

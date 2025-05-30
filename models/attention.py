@@ -24,10 +24,6 @@ class BaseAttention(nn.Module):
         self.out_proj = nn.Linear(self.dim, self.dim, bias=atten_cfg.get('out_bias', True))
         self.dropout = nn.Dropout(model_cfg['dropout'])
         
-        if model_cfg['bias_injection'] == "attention":
-            self.template_embed = nn.Embedding(config['tokenizer'].get('vocab_size', 64), self.dim)
-            self.bias_proj = nn.Linear(self.dim, 1)
-        
         # Initialize parameters
         self._init_parameters()
 
@@ -40,7 +36,7 @@ class BaseAttention(nn.Module):
         if self.out_proj.bias is not None:
             nn.init.zeros_(self.out_proj.bias)
 
-    def forward(self, x: torch.Tensor, sequences: torch.Tensor, mask: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
         """Forward pass with standard causal masking (no windowing)."""
         B, T, _ = x.shape
 
@@ -50,18 +46,6 @@ class BaseAttention(nn.Module):
         
         # Compute attention scores
         attn_scores = (q @ k.transpose(-2, -1)) * self.scale
-        
-        if hasattr(self, 'template_embed'):
-            # Get (B, T_template, D)
-            template_emb = self.template_embed(sequences)
-            
-            # Project and mean over template tokens to get (B, D)
-            embed_bias = self.bias_proj(template_emb).mean(dim=1)  # dim=1 is token dim
-            
-            # Project embed_bias to a scalar per head or per sequence
-            # Simple scalar bias added to all attention scores
-            bias_scalar = embed_bias.mean(dim=1).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, 1)
-            attn_scores = attn_scores + bias_scalar
         
         # Apply standard causal mask (upper triangular)
         if mask:
@@ -100,22 +84,21 @@ class MultiHeadAttention(BaseAttention):
         if config['attention'].get('memory_efficient', False):
             self.forward = self._memory_efficient_forward
 
-    def _memory_efficient_forward(self, x: torch.Tensor, sequences: torch.Tensor, mask: bool = True, *args) -> torch.Tensor:
+    def _memory_efficient_forward(self, x: torch.Tensor, mask: bool = True, *args) -> torch.Tensor:
         """Memory-efficient implementation using chunking."""
         B, T, _ = x.shape
         chunk_size = self.config['attention'].get('chunk_size', 256)
         
         # Process in chunks if sequence is long
         if T <= chunk_size:
-            return super().forward(x, sequences, mask)
+            return super().forward(x, mask)
             
         # Split into chunks
         chunks = x.split(chunk_size, dim=1)
-        sequence_chunks = sequences.split(chunk_size, dim=1)
         outputs = []
         
-        for chunk, seq_chunk in zip(chunks, sequence_chunks):
-            outputs.append(super().forward(chunk, seq_chunk, mask))
+        for chunk in chunks:
+            outputs.append(super().forward(chunk, mask))
             
         return torch.cat(outputs, dim=1)
 
@@ -145,7 +128,7 @@ class CollaborativeAttention(BaseAttention):
         nn.init.xavier_uniform_(self.mixing_k)
         nn.init.xavier_uniform_(self.post_mixing.weight)
 
-    def forward(self, x: torch.Tensor, sequences: torch.Tensor, mask: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
         B, T, _ = x.shape
         
         # Shared projections
@@ -162,18 +145,6 @@ class CollaborativeAttention(BaseAttention):
 
         # Attention scores
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
-        
-        if hasattr(self, 'template_embed'):
-            # Get (B, T_template, D)
-            template_emb = self.template_embed(sequences)
-            
-            # Project and mean over template tokens to get (B, D)
-            embed_bias = self.bias_proj(template_emb).mean(dim=1)  # dim=1 is token dim
-            
-            # Project embed_bias to a scalar per head or per sequence
-            # Option 1: Simple scalar bias added to all attention scores
-            bias_scalar = embed_bias.mean(dim=-1).unsqueeze(1).unsqueeze(2).unsqueeze(3)  # (B, 1, 1, 1)
-            attn_scores = attn_scores + bias_scalar
 
         if mask:
             causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).triu(diagonal=1)

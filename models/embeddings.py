@@ -28,12 +28,6 @@ class Embeddings(nn.Module):
         self.layer_norm = nn.LayerNorm(self.embed_dim) if config['training'].get('pre_norm', True) else None
         self.dropout = nn.Dropout(p=model_cfg.get('dropout', 0.1))
         
-        if model_cfg['bias_injection'] == "embedding":
-            self.template_embed = nn.Embedding(config['tokenizer'].get('vocab_size', 64), self.embed_dim)
-            self.bias_scale = nn.Parameter(
-                torch.tensor(model_cfg.get('bias_scale_init', 0.1))
-            )
-        
         # Mixed precision support
         self._autocast_kwargs = {
             'device_type': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -76,14 +70,15 @@ class Embeddings(nn.Module):
             except (ImportError, AttributeError) as e:
                 print(f"Warning: Could not initialize positional embeddings: {str(e)}")
 
-    def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with optional mixed precision and normalization."""
         with torch.amp.autocast(**self._autocast_kwargs):
             # Token embeddings
             x = self.token_embedding(x)  # (B, T) -> (B, T, D)
             
-            if hasattr(self, 'template_embed'):
-                x = x + self.bias_scale * self.template_embed(sequences).sum(dim=2)
+            # Scale embeddings if specified
+            if hasattr(self, 'embed_scale'):
+                x = x * self.embed_scale
             
             # Positional embeddings
             if self.position_embedding is not None:
