@@ -172,3 +172,6 @@ cython_debug/
 
 /data
 /results
+
+.bin
+.txt

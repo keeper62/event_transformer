@@ -26,9 +26,9 @@ class LogTemplateMiner:
         """ Adds a single log message to the template miner. """
         self.template_miner.add_log_message(log_message)
             
-    def get_event_id(self, log_message):
+    def get_event_id(self, log_message, full_search_strategy = "fallback"):
         """ Retrieves the event ID for a given log message. """
-        result = self.template_miner.match(log_message, 'fallback')
+        result = self.template_miner.match(log_message, full_search_strategy)
         return result.cluster_id
 
     def get_vocab_size(self):

@@ -19,7 +19,7 @@ def process_log_file(input_path: str,
         max_lines: Maximum number of lines to process (None for all)
         show_progress: Whether to show progress bar
     """
-    pattern = r'^(?:\S+\s+){2}(?P<message>.+)'
+    pattern = r'^(?P<timestamp>\d+(?:\.\d+)?) (?P<hostname>\S+) (?P<message>.+)$'
     
     # Initialize components
     template_miner = LogTemplateMiner(drain_state_path)
@@ -39,15 +39,14 @@ def process_log_file(input_path: str,
         
         for line in lines:
             try:
-                # Extract log message (adjust splitting based on your log format)
-                log_message = re.match(pattern, line)
-                if log_message:
-                    log_message = log_message.group('message')
+                match = re.match(pattern, line)
+                if match:
+                    log_message = match.group('message')
                     template_miner.add_log_message(log_message)
                     tokenizer.train(log_message.split())  # Accumulate word counts
             except Exception as e:
-                print(f"Error processing line: {line.strip()}. Error: {e} \
-                    Make sure the log file is properly formatted using log_formatter.py!")
+                print(f"Error processing line: {line.strip()}. Error: {e} "
+                    "Make sure the log file is properly formatted using log_formatter.py!")
     
     # Save outputs
     Path(drain_state_path).parent.mkdir(parents=True, exist_ok=True)

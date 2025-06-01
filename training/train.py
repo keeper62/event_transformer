@@ -414,7 +414,6 @@ class TransformerLightning(pl.LightningModule):
             self._logger.info(f"Model will use GPU: {torch.cuda.get_device_name(0)}")
         else:
             self._logger.info("Model will use CPU")
-
         
     def forward(self, inputs: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         return self.model(inputs, sequences) 
@@ -438,6 +437,7 @@ class TransformerLightning(pl.LightningModule):
             {
                 **base_metrics,
                 "bleu": LightningNGramScore(ngram_size=4),
+                "f1": torchmetrics.F1Score(task='multiclass', num_classes=self.num_classes, average='weighted')
             },
             prefix="val/"
         )

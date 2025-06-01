@@ -2,14 +2,15 @@ import re
 from pathlib import Path
 from tqdm import tqdm
 from typing import Tuple, Optional, List, Union, Pattern
+from datetime import datetime
 
 def reformat_log_file(input_path: str, 
                      output_path: str,
-                     format_type: str = "timestamp_hostname_message",
                      custom_patterns: Optional[List[Union[str, Pattern]]] = None,
                      fallback_timestamp: str = "unknown_timestamp",
                      fallback_hostname: str = "unknown_hostname",
                      max_lines: Optional[int] = None,
+                     timestamp_format: str = "%Y-%m-%d %H:%M:%S,%f",
                      show_progress: bool = True) -> None:
     """
     Reformat log file into structured format with either:
@@ -90,11 +91,9 @@ def reformat_log_file(input_path: str,
             if not line:
                 continue
                 
-            matched = False
             for pattern in patterns:
                 match = pattern.match(line)
                 if match:
-                    matched = True
                     groups = match.groupdict()
                     timestamp = groups.get('timestamp', '').strip()
                     hostname = groups.get('hostname', '').strip()
@@ -102,22 +101,15 @@ def reformat_log_file(input_path: str,
                     
                     if not timestamp:
                         timestamp = fallback_timestamp
+                    else:
+                        dt = datetime.strptime(timestamp, timestamp_format)
+                        timestamp = dt.timestamp()
+                        
                     if not hostname:
                         hostname = fallback_hostname
                     
-                    if format_type == "timestamp_hostname_message":
-                        f_out.write(f"{timestamp} {hostname} {message}\n")
-                    else:
-                        f_out.write(f"{timestamp} {message}\n")
-                    break
-            
-            if not matched:
-                # Fallback - write the whole line as message
-                if format_type == "timestamp_hostname_message":
-                    f_out.write(f"{fallback_timestamp} {fallback_hostname} {line}\n")
-                else:
-                    f_out.write(f"{fallback_timestamp} {line}\n")
-    
+                    f_out.write(f"{timestamp} {hostname} {message}\n")
+
     if show_progress:
         print(f"\nSuccessfully reformatted logs to: {output_path}")
 
@@ -144,11 +136,10 @@ if __name__ == "__main__":
     
     parser.add_argument('input_path', type=str, help='Path to input log file')
     parser.add_argument('output_path', type=str, help='Path to save reformatted log file')
-    parser.add_argument('--format', type=str, default="timestamp_hostname_message",
-                       choices=["timestamp_hostname_message", "timestamp_message"],
-                       help='Output format type')
     parser.add_argument('--custom_pattern', type=str, action='append', dest='custom_patterns',
                        help='Custom regex pattern to add (can specify multiple)')
+    parser.add_argument('--timestamp_format', type=str, default="%Y-%m-%d %H:%M:%S,%f",
+                        help="Timestamp format according to ISO 8601")
     parser.add_argument('--fallback_timestamp', type=str, default="unknown_timestamp",
                        help='Text to use when timestamp cannot be extracted')
     parser.add_argument('--fallback_hostname', type=str, default="unknown_hostname",
@@ -163,10 +154,13 @@ if __name__ == "__main__":
     reformat_log_file(
         input_path=args.input_path,
         output_path=args.output_path,
-        format_type=args.format,
         custom_patterns=args.custom_patterns,
         fallback_timestamp=args.fallback_timestamp,
         fallback_hostname=args.fallback_hostname,
         max_lines=args.max_lines,
+        timestamp_format=args.timestamp_format,
         show_progress=args.show_progress
     )
+    
+# If it returns an empty file, the log file might need to be reprocessed 
+# so each individual event is a single line.

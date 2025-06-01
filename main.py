@@ -1,23 +1,23 @@
 from models import Transformer, LogTemplateMiner, load_config
-from dataset_class.bgl_dataset import Dataset
+#from dataset_class.bgl_dataset import Dataset
 import torch
 
 def main():
     # Load Transformer model
-    config = load_config("configs/base_config.yaml")['base_config']
+    config = load_config("configs/optimal_model.yaml")['base_config']
     
-    tokenizer = LogTemplateMiner("drain3_state.bin")
-    tokenizer.load_state()
-    
-    config['model']['vocab_size'] = tokenizer.get_vocab_size()
-    
-    # Load dataset
-    dataset = Dataset(
-        path=config['dataset']['path'], 
-        prediction_steps=config['model']['prediction_steps'],
-        context_length=config['model']['context_length'],
-        transform=tokenizer.transform, 
-    )
+    #tokenizer = LogTemplateMiner("drain3_state.bin")
+    #tokenizer.load_state()
+    #
+    #config['model']['vocab_size'] = tokenizer.get_vocab_size()
+    #
+    ## Load dataset
+    #dataset = Dataset(
+    #    path=config['dataset']['path'], 
+    #    prediction_steps=config['model']['prediction_steps'],
+    #    context_length=config['model']['context_length'],
+    #    transform=tokenizer.transform, 
+    #)
     
     # Load Transformer model
     model = Transformer(config)
@@ -34,14 +34,14 @@ def main():
     #model.load_state_dict(state_dict)
     model.to(config['device']).eval()
     
-    data = dataset[0][0]
-    
-    predicted_events = model.predict(data)
-    
-    print("\nPredicted Log Events:")
-    for step, predicted_events in enumerate([predicted_events]):
-        predicted_template = tokenizer.decode_event_id_sequence(predicted_events)
-        print(f"Step {step+1}: {predicted_template} (ID: {predicted_events})")
+    #data = dataset[0][0]
+    #
+    #predicted_events = model.predict(data)
+    #
+    #print("\nPredicted Log Events:")
+    #for step, predicted_events in enumerate([predicted_events]):
+    #    predicted_template = tokenizer.decode_event_id_sequence(predicted_events)
+    #    print(f"Step {step+1}: {predicted_template} (ID: {predicted_events})")
         
 if __name__ == "__main__":
     main()
