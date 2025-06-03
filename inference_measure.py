@@ -44,14 +44,16 @@ def measure_performance(model, input_tensor, sequences):
             _ = model.predict(input_tensor, sequences)
     
     # Timed runs
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start_time = time.time()
     
     for _ in range(NUM_TEST):
         with torch.no_grad():
             _ = model.predict(input_tensor, sequences)
     
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     elapsed = time.time() - start_time
     avg_time = elapsed / NUM_TEST
     return avg_time
@@ -68,7 +70,7 @@ def load_config(config_name, directory):
 
 def convert(input, tokenizer, template_miner):
     return torch.stack([torch.tensor(tokenizer.transform(template_miner.decode_event_id_sequence(event_id)), 
-                                                      device = DEVICE) for event_id in input[0].tolist()])
+                                                      device = DEVICE) for event_id in input.tolist()])
 
 def main():
     ckpt_files = list(Path(SAVED_MODELS_DIR).glob('trained_model_*_final.ckpt'))
@@ -95,7 +97,9 @@ def main():
                 config = yaml.safe_load(f)['base_config']
                 
             template_miner = LogTemplateMiner(config['dataset']['drain_path'])
+            config['model']['vocab_size'] = template_miner.get_vocab_size()
             tokenizer = LogTokenizer(config['tokenizer']['tokenizer_length'], config['tokenizer']['tokenizer_path'])
+            config['tokenizer']['vocab_size'] = tokenizer.get_vocab_size()
             
             model = build_model_from_config(config)
             model = load_lightning_checkpoint(ckpt_path, model)
@@ -103,12 +107,11 @@ def main():
             # Verify forward pass
             with torch.no_grad():
                 sequences = convert(dummy_input[0], tokenizer, template_miner) 
-                test_out = model.predict(dummy_input[0], sequences)  # Test single sample
-                print(f"Output: {test_out}")
+                model.predict(dummy_input[0], sequences)  # Test single sample
             
             # Measure performance
             sequences_input = torch.stack([convert(input, tokenizer, template_miner) for input in dummy_input])
-            avg_time = measure_performance(model, sequences_input)
+            avg_time = measure_performance(model, dummy_input, sequences_input)
             avg_ms = avg_time * 1000
             samples_per_sec = BATCH_SIZE / avg_time
             
