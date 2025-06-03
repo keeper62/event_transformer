@@ -10,8 +10,27 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from models import load_config
-from training import DataModule, TransformerLightning
+from models import load_config, Transformer
+from training import DataModule, TransformerLightning, RNNModel, LSTMModel
+
+def return_model_cls(model: str, config):
+    if model == 'transformer':
+        return Transformer(config)
+    if model == 'rnn':
+        return RNNModel(
+            config['model']['vocab_size'],
+            config['model']['embed_dim'],
+            128,
+            config['model']['num_layers']
+        )
+    if model == 'lstm':
+        return LSTMModel(
+            config['model']['vocab_size'],
+            config['model']['embed_dim'],
+            128,
+            config['model']['num_layers']
+        )
+    raise f"{model} is not an available model"
 
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
@@ -90,6 +109,7 @@ def train_with_config(
     num_accelerators: int,
     num_nodes: int,
     accelerator: str,
+    model: str = 'transformer',
     test_mode: bool = False
 ) -> Dict[str, Any]:
     """Train the model with the given configuration.
@@ -110,6 +130,7 @@ def train_with_config(
         logger.debug("Initializing model")
         model = TransformerLightning(
             config, 
+            return_model_cls(model, config),
             config_name, 
             important_classes=important_errors,
         )
@@ -156,7 +177,7 @@ def train_with_config(
 def main() -> None:
     """Enhanced main function with better result handling."""
     parser = argparse.ArgumentParser(
-        description="Train Transformer model with specified configuration.",
+        description="Train a model (Transformer/LSTM/RNN) with specified configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("--config", type=str, default="configs/base_config.yaml")
@@ -166,12 +187,14 @@ def main() -> None:
     parser.add_argument("--test_mode", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--notes", type=str, default="None")
+    parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "lstm", "rnn"])
 
     args = parser.parse_args()
-    
+
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
+
     
     setup_environment()
     
@@ -185,6 +208,7 @@ def main() -> None:
             args.num_accelerators, 
             args.num_nodes, 
             args.accelerator, 
+            args.model_type,
             test_mode=args.test_mode
         )
         

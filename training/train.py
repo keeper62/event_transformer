@@ -3,7 +3,7 @@ import importlib
 from typing import Optional, Dict, Any, Tuple
 import logging
 
-from models import Transformer, LogTemplateMiner, LogTokenizer
+from models import LogTemplateMiner, LogTokenizer
 from torch.utils.data import DataLoader, random_split
 import torch
 import pytorch_lightning as pl
@@ -346,7 +346,7 @@ class DataModule(pl.LightningDataModule):
             raise
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], config_name: Optional[str] = None, 
+    def __init__(self, config: Dict[str, Any], model_cls: Any, config_name: Optional[str] = None, 
                 important_classes: torch.Tensor | None = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
@@ -357,7 +357,7 @@ class TransformerLightning(pl.LightningModule):
         
         # Model components
         self._logger.debug(f"Creating Transformer with config: {config['model']}")
-        self.model = Transformer(config)
+        self.model = model_cls
         self.num_classes = config['model']['vocab_size']
         self.seq_len = config['model'].get('seq_len', 512)  # Assuming fixed sequence length
         self._logger.info(f"Model initialized with num_classes: {self.num_classes}, seq_len: {self.seq_len}")
@@ -423,7 +423,7 @@ class TransformerLightning(pl.LightningModule):
         # Common metrics for all phases
         base_metrics = {
             "acc": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes),
-            "top5": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes, top_k=5),
+            "top5": torchmetrics.Accuracy(task='multiclass', num_classes=self.num_classes, top_k=5)
         }
         
         # Training metrics
@@ -437,7 +437,9 @@ class TransformerLightning(pl.LightningModule):
             {
                 **base_metrics,
                 "bleu": LightningNGramScore(ngram_size=4),
-                "f1": torchmetrics.F1Score(task='multiclass', num_classes=self.num_classes, average='weighted')
+                "recall": torchmetrics.Recall(task='multiclass', num_classes=self.num_classes),
+                'precision': torchmetrics.Precision(task='multiclass', num_classes=self.num_classes),
+                "f1": torchmetrics.F1Score(task='multiclass', num_classes=self.num_classes, average='micro')
             },
             prefix="val/"
         )
