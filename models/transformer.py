@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import importlib
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from .embeddings import Embeddings
 
 class Transformer(nn.Module):
@@ -110,6 +110,30 @@ class Transformer(nn.Module):
         # Convert to list and remove batch dim if needed
         result = preds.tolist()
         return result[0] if was_1d else result
+    
+    @torch.no_grad()
+    def topk_predict(self, x: torch.Tensor, sequences: torch.Tensor, temperature: float = 1.0, top_k: int = 3) -> List[Tuple[int, float]]:
+        """
+        Predict top-k most probable tokens with their probabilities.
+
+        Args:
+            x: Input tensor of shape (seq_len,) or (batch_size, seq_len)
+            sequences: Additional sequence input
+            temperature: Softmax temperature
+            top_k: Number of top predictions to return
+
+        Returns:
+            List of (token_id, probability) tuples
+        """
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        logits = self.forward(x, sequences)[:, -1, :] / temperature
+        probs = torch.softmax(logits, dim=-1)
+
+        topk_probs, topk_indices = torch.topk(probs, top_k)
+        return list(zip(topk_indices[0].tolist(), topk_probs[0].tolist()))
+
 
     def get_num_params(self) -> int:
         """Return the total number of trainable parameters."""

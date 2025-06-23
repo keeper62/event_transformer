@@ -4,7 +4,7 @@ set -e  # Exit on error
 # Determine base directory (current working directory)
 BaseDir=$(pwd)
 
-# Define paths relative to the base directory (use forward slashes for Unix)
+# Default paths (relative to BaseDir)
 INPUT_LOG="$BaseDir/hadoop/combined_logs.txt"
 PATH_DRAIN="$BaseDir/states/drain3_state_hdfs.bin"
 PATH_TOKENIZER="$BaseDir/states/tokenizer_state_hdfs.txt"
@@ -12,10 +12,23 @@ OUTPUT_LOG_TEMPORARY="$BaseDir/temp/log_reformatted.log"
 FINAL_OUTPUT="$BaseDir/data/hdfs.log"
 REGEX='^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<message>.+?) (?P<host>mesos-\d+)$'
 
+# Parse command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --INPUT_LOG) INPUT_LOG="$BaseDir/$2"; shift ;;
+        --PATH_DRAIN) PATH_DRAIN="$BaseDir/$2"; shift ;;
+        --PATH_TOKENIZER) PATH_TOKENIZER="$BaseDir/$2"; shift ;;
+        --FINAL_OUTPUT) FINAL_OUTPUT="$BaseDir/$2"; shift ;;
+        --REGEX) REGEX="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
 # Create temp directory if it doesn't exist
 mkdir -p "$BaseDir/temp"
 
-# Cleanup function to remove temporary log file if it exists
+# Cleanup function to remove temporary log file
 cleanup_temp_file() {
     if [[ -f "$OUTPUT_LOG_TEMPORARY" ]]; then
         echo "Cleaning up temporary file..."

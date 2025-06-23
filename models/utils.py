@@ -5,6 +5,7 @@ from typing import Dict, Any
 from collections import Counter
 import torch
 import math
+from pathlib import Path
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -17,6 +18,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Parsed configuration as a dictionary.
     """
+    config_path = Path(config_path)
     with open(config_path, 'r') as file:
         return yaml.safe_load(file)
 

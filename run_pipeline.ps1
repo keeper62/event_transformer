@@ -1,13 +1,20 @@
+param(
+    [string]$INPUT_LOG = "hadoop\combined_logs.txt",
+    [string]$PATH_DRAIN = "states\drain3_state_hdfs.bin",
+    [string]$PATH_TOKENIZER = "states\tokenizer_state_hdfs.txt",
+    [string]$FINAL_OUTPUT = "data\hdfs.log",
+    [string]$REGEX = "^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<message>.+?) (?P<hostname>mesos-\d+)$"
+)
+
 # Determine base directory (current working directory)
 $BaseDir = Get-Location
 
-# Define paths relative to the base directory
-$INPUT_LOG = Join-Path $BaseDir "hadoop\combined_logs.txt"
-$PATH_DRAIN = Join-Path $BaseDir "states\drain3_state_hdfs.bin"
-$PATH_TOKENIZER = Join-Path $BaseDir "states\tokenizer_state_hdfs.txt"
+# Resolve full paths
+$INPUT_LOG = Join-Path $BaseDir $INPUT_LOG
+$PATH_DRAIN = Join-Path $BaseDir $PATH_DRAIN
+$PATH_TOKENIZER = Join-Path $BaseDir $PATH_TOKENIZER
+$FINAL_OUTPUT = Join-Path $BaseDir $FINAL_OUTPUT
 $OUTPUT_LOG_TEMPORARY = Join-Path $BaseDir "temp\log_reformatted.log"
-$FINAL_OUTPUT = Join-Path $BaseDir "data\hdfs.log"
-$REGEX = "^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<message>.+?) (?P<hostname>mesos-\d+)$"
 
 # Create temp directory if it doesn't exist
 $tempDir = Join-Path $BaseDir "temp"
@@ -43,17 +50,14 @@ function Run-Step {
 }
 
 try {
-    # Step 1: process_log_file (first script)
     Run-Step -Message "Running initial process_log_file..." -Action {
-        python -m utils.log_reformatter $INPUT_LOG $OUTPUT_LOG_TEMPORARY --custom_pattern $REGEX
+        python -m utils.log_reformatter $INPUT_LOG $OUTPUT_LOG_TEMPORARY --custom_pattern "$REGEX"
     }
 
-    # Step 2: generate_drain_and_tokenizer
     Run-Step -Message "Running generate_drain_and_tokenizer..." -Action {
         python -m utils.generate_drain_and_tokenizer $OUTPUT_LOG_TEMPORARY --drain_output $PATH_DRAIN --tokenizer_output $PATH_TOKENIZER
     }
 
-    # Step 3: process_log_file (with drain state)
     Run-Step -Message "Updating log file with event IDs..." -Action {
         python -m utils.process_log_file $OUTPUT_LOG_TEMPORARY $FINAL_OUTPUT --drain_state $PATH_DRAIN
     }
@@ -61,6 +65,5 @@ try {
     Write-Host "Pipeline completed successfully! Final output is at: $FINAL_OUTPUT"
 }
 finally {
-    # Always clean up the temporary file
     Cleanup-TempFile
 }
