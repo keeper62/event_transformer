@@ -34,13 +34,13 @@ class Embeddings(nn.Module):
             'enabled': config['training'].get('mixed_precision', True)
         }
         
-        self.bias_scale = nn.Parameter(
-            torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
-        )
-        
-        self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.embed_dim)
-        #self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.sequence_proj = nn.Linear(self.model_cfg['context_length'], 1)  
+        if self.model_cfg['bias_injection'] == "embedding":
+            self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.embed_dim)
+            #self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
+            self.sequence_proj = nn.Linear(self.model_cfg['context_length'], 1)  
+            self.bias_scale = nn.Parameter(
+                torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
+            )
 
     def _init_embeddings(self, init_type: str) -> None:
         """Initialize embedding weights based on config."""

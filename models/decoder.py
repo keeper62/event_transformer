@@ -17,8 +17,9 @@ class TransformerDecoderLayer(nn.Module):
         self._init_configurations(config)
         self._init_components(config)
         
-        self.template_embed = nn.Embedding(self.vocab_size, self.embed_dim)
-        self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        if self.model_cfg['bias_injection'] == "attention" or self.model_cfg['bias_injection'] == "ffn":
+            self.template_embed = nn.Embedding(self.vocab_size, self.embed_dim)
+            self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def _init_configurations(self, config: Dict[str, Any]) -> None:
         """Initialize training configurations."""
