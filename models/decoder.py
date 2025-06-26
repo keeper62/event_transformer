@@ -57,6 +57,7 @@ class TransformerDecoderLayer(nn.Module):
         sublayer_fn: Callable[[torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
         norm: nn.Module,
         dropout: nn.Module,
+        sequences: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         attention_mask: bool = False
     ) -> torch.Tensor:
@@ -66,7 +67,7 @@ class TransformerDecoderLayer(nn.Module):
         if self.pre_norm:
             x = norm(x)
         
-        x_out = sublayer_fn(x, attention_mask)
+        x_out = sublayer_fn(x, sequences, attention_mask)
         
         if bias is not None:
             x_out = x_out + self.bias_scale * bias
@@ -83,14 +84,15 @@ class TransformerDecoderLayer(nn.Module):
         embed_bias = None
         if self.model_cfg['bias_injection'] is not None:
             # Take the mean to prevent bias magnitude to grow with sequence length
-            embed_bias = self.bias_proj(self.template_embed(sequences)).mean(dim=-2) / len(sequences)
+            embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)
         
         # Self-attention
         x = self._forward_sublayer(
             x,
-            lambda x, mask: self.attn(x, mask=mask),
+            lambda x, sequences, mask: self.attn(x, sequences, mask=mask),
             self.norm1,
             self.attn_dropout,
+            sequences,
             embed_bias if self.model_cfg['bias_injection'] == "attention" else None,
             attention_mask=True
         )
@@ -98,18 +100,20 @@ class TransformerDecoderLayer(nn.Module):
         # Cross-attention
         x = self._forward_sublayer(
             x,
-            lambda x, _: self.attn(x),
+            lambda x, sequences, _: self.attn(x, sequences),
             self.norm2,
             self.attn_dropout,
+            sequences,
             embed_bias if self.model_cfg['bias_injection'] == "attention" else None
         )
         
         # FFN
         x = self._forward_sublayer(
             x,
-            lambda x, _: self.ffn(x),
+            lambda x, _, __: self.ffn(x),
             self.norm3,
             self.ffn_dropout,
+            sequences,
             embed_bias if self.model_cfg['bias_injection'] == "ffn" else None
         )
         
