@@ -29,12 +29,13 @@ def setup_logger(name: str | None = None) -> logging.Logger:
     return logger
 
 class AbstractMultiHostDataset(Dataset, ABC):
-    def __init__(self, path, context_length, template_miner=None, tokenizer=None, test_mode=False):
+    def __init__(self, path, context_length, uncommon_ids = None, template_miner=None, tokenizer=None, test_mode=False):
         self.path = path
         self.template_miner = template_miner
         self.tokenizer = tokenizer
         self.context_length = context_length
         self.test_mode = test_mode
+        self.uncommon_ids = uncommon_ids
         
         self.logger = setup_logger(self.__class__.__name__)
         
@@ -80,9 +81,9 @@ class AbstractMultiHostDataset(Dataset, ABC):
         return processed_groups
 
     def _generate_adaptive_windows(self):
-        """Generate windows with shape validation"""
         sample_indices = []
         total_window_size = self.context_length + 1
+        stride = max(1, self.context_length // 4)
         self.logger.debug(f"Generating windows with context_length={self.context_length}")
 
         for group_idx, (tokens, _) in enumerate(self.grouped_data):
@@ -91,18 +92,24 @@ class AbstractMultiHostDataset(Dataset, ABC):
             if seq_len <= total_window_size:
                 if seq_len < total_window_size:
                     self.logger.warning(f"Warning: Group {group_idx} length {seq_len} < required window size {total_window_size}")
-                sample_indices.append((group_idx, 0))
+                if self.uncommon_ids is None or any(t.item() in self.uncommon_ids for t in tokens):
+                    sample_indices.append((group_idx, 0))
                 continue
-                
+            
             pos = 0
-            while pos + total_window_size <= seq_len:
-                # Validate window bounds
-                if pos + total_window_size > seq_len:
-                    self.logger.warning(f"Invalid window bounds: pos={pos}, seq_len={seq_len}, window_size={total_window_size}")
-                    break
-                    
-                sample_indices.append((group_idx, pos))
-                pos += max(1, self.context_length // 4)  # Simplified stride for debugging
+            if self.uncommon_ids is None:
+                # Normal sliding windows
+                while pos + total_window_size <= seq_len:
+                    sample_indices.append((group_idx, pos))
+                    pos += stride
+            else:
+                # Filtered window generation — only include windows with at least one uncommon id
+                pos = 0
+                while pos + total_window_size <= seq_len:
+                    window_token = tokens[pos + total_window_size - 1]
+                    if window_token in self.uncommon_ids:
+                        sample_indices.append((group_idx, pos))
+                    pos += 1
 
         self.logger.debug(f"Generated {len(sample_indices)} windows total")
         return sample_indices
@@ -135,12 +142,13 @@ class AbstractMultiHostDataset(Dataset, ABC):
         pass
 
 class AbstractSingleGroupDataset(Dataset, ABC):
-    def __init__(self, path, context_length, template_miner=None, tokenizer=None, test_mode=False):
+    def __init__(self, path, context_length, uncommon_ids = None, template_miner=None, tokenizer=None, test_mode=False):
         self.path = path
         self.template_miner = template_miner
         self.tokenizer = tokenizer
         self.context_length = context_length
         self.test_mode = test_mode
+        self.uncommon_ids = uncommon_ids
         
         self.logger = setup_logger(self.__class__.__name__)
         
@@ -155,22 +163,35 @@ class AbstractSingleGroupDataset(Dataset, ABC):
     def __len__(self) -> int:
         """Returns the number of samples in the dataset"""
         return len(self.sample_indices)
-
+    
     def _process_data(self):
         """Process raw data into tensors with shape validation"""
         try:
-            tokens, sequences = zip(*[
-                (int(event_id), self.tokenizer(message)) 
-                for event_id, message in self.data
-            ])
+            # Process in chunks to avoid memory issues
+            batch_size = 10000  # Adjust based on your GPU memory
+            token_batches = []
+            seq_batches = []
             
-            # Convert to tensors
-            token_tensor = torch.tensor(tokens, dtype=torch.long)
-            seq_tensor = torch.stack([torch.tensor(seq, dtype=torch.long) for seq in sequences])
+            for i in range(0, len(self.data), batch_size):
+                batch = self.data[i:i+batch_size]
+                tokens, sequences = zip(*[
+                    (int(event_id), self.tokenizer(message)) 
+                    for event_id, message in batch
+                ])
+                
+                # Convert batch to tensors and move to device
+                token_batches.append(torch.tensor(tokens, dtype=torch.long))
+                seq_batches.append(torch.stack([
+                    torch.tensor(seq, dtype=torch.long) 
+                    for seq in sequences
+                ]))
             
-            # Validate shapes
-            if len(tokens) != len(sequences):
-                raise ValueError(f"Tokens length {len(tokens)} != sequences length {len(sequences)}")
+            # Concatenate batches
+            token_tensor = torch.cat(token_batches)
+            seq_tensor = torch.cat(seq_batches)
+            
+            if len(token_tensor) != len(seq_tensor):
+                raise ValueError(f"Tokens length {len(token_tensor)} != sequences length {len(seq_tensor)}")
             
             return token_tensor, seq_tensor
             
@@ -179,29 +200,36 @@ class AbstractSingleGroupDataset(Dataset, ABC):
             raise
 
     def _generate_adaptive_windows(self):
-        """Generate windows with shape validation"""
-        sample_indices = []
         total_window_size = self.context_length + 1
         seq_len = len(self.tokens)
-        self.logger.debug(f"Generating windows with context_length={self.context_length}")
+        sample_indices = []
+        stride = max(1, self.context_length // 4)
 
         if seq_len <= total_window_size:
             if seq_len < total_window_size:
-                self.logger.warning(f"Warning: Data length {seq_len} < required window size {total_window_size}")
-            sample_indices.append(0)
+                self.logger.warning(f"Data length {seq_len} < required window size {total_window_size}")
+            # If uncommon_ids is None or tokens include any uncommon_id, add index 0
+            if self.uncommon_ids is None or any(t.item() in self.uncommon_ids for t in self.tokens):
+                sample_indices.append(0)
             return sample_indices
-            
-        pos = 0
-        while pos + total_window_size <= seq_len:
-            # Validate window bounds
-            if pos + total_window_size > seq_len:
-                self.logger.warning(f"Invalid window bounds: pos={pos}, seq_len={seq_len}, window_size={total_window_size}")
-                break
-                
-            sample_indices.append(pos)
-            pos += max(1, self.context_length // 4)  # Simplified stride for debugging
 
-        self.logger.debug(f"Generated {len(sample_indices)} windows total")
+        if self.uncommon_ids is None:
+            # Normal window generation (no filtering)
+            pos = 0
+            while pos + total_window_size <= seq_len:
+                sample_indices.append(pos)
+                pos += stride
+            self.logger.debug(f"Generated {len(sample_indices)} windows normally")
+        else:
+            # Filtered window generation — only include windows with at least one uncommon id
+            pos = 0
+            while pos + total_window_size <= seq_len:
+                window_token = self.tokens[pos + total_window_size - 1]
+                if window_token in self.uncommon_ids:
+                    sample_indices.append(pos)
+                pos += 1
+            self.logger.info(f"Filtered down to {len(sample_indices)} windows based on uncommon_ids")
+
         return sample_indices
 
     def __getitem__(self, idx: int):

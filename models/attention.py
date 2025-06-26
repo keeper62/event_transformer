@@ -18,11 +18,17 @@ class BaseAttention(nn.Module):
         self.head_dim = self.dim // self.heads
         self.seq_len = model_cfg['context_length']
         self.scale = self.head_dim ** -0.5
+        self.bias_injection = model_cfg['bias_injection']
         
         # Projection layers
         self.qkv = nn.Linear(self.dim, self.dim * 3, bias=atten_cfg.get('qkv_bias', False))
         self.out_proj = nn.Linear(self.dim, self.dim, bias=atten_cfg.get('out_bias', True))
         self.dropout = nn.Dropout(model_cfg['dropout'])
+        
+        self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.dim)
+        self.bias_scale = nn.Parameter(
+            torch.tensor(model_cfg.get('bias_scale_init', 0.1))
+        )
         
         # Initialize parameters
         self._init_parameters()
@@ -36,7 +42,7 @@ class BaseAttention(nn.Module):
         if self.out_proj.bias is not None:
             nn.init.zeros_(self.out_proj.bias)
 
-    def forward(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sequences: torch.Tensor, mask: bool = True) -> torch.Tensor:
         """Forward pass with standard causal masking (no windowing)."""
         B, T, _ = x.shape
 
@@ -60,6 +66,10 @@ class BaseAttention(nn.Module):
         out = attn_weights @ v
         out = out.transpose(1, 2).reshape(B, T, -1)
         
+        if self.bias_injection == "attention_attention":
+            embed = self.template_embed(sequences)
+            out = out + embed.sum(dim=-2) * self.bias_scale
+        
         return self.out_proj(out)
 
     def get_attention_weights(self, x: torch.Tensor, mask: bool = True) -> torch.Tensor:
@@ -81,26 +91,6 @@ class MultiHeadAttention(BaseAttention):
     """Standard multi-head attention with optional memory-efficient implementation."""
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        if config['attention'].get('memory_efficient', False):
-            self.forward = self._memory_efficient_forward
-
-    def _memory_efficient_forward(self, x: torch.Tensor, mask: bool = True, *args) -> torch.Tensor:
-        """Memory-efficient implementation using chunking."""
-        B, T, _ = x.shape
-        chunk_size = self.config['attention'].get('chunk_size', 256)
-        
-        # Process in chunks if sequence is long
-        if T <= chunk_size:
-            return super().forward(x, mask)
-            
-        # Split into chunks
-        chunks = x.split(chunk_size, dim=1)
-        outputs = []
-        
-        for chunk in chunks:
-            outputs.append(super().forward(chunk, mask))
-            
-        return torch.cat(outputs, dim=1)
 
 class CollaborativeAttention(BaseAttention):
     """Collaborative attention with learned mixing across all heads for q, k, v."""

@@ -181,12 +181,14 @@ class LightningNGramScore(torchmetrics.Metric):
         return torch.exp(torch.mean(torch.log(precisions)))
 
 class DataModule(pl.LightningDataModule):
-    def __init__(self, config: Dict[str, Any], test_mode: bool = False, logger=None):
+    def __init__(self, config: Dict[str, Any], uncommon_ids:torch.Tensor = None, test_mode: bool = False, logger=None):
         super().__init__()
         self.config = config
         self.test_mode = test_mode
         self._setup_complete = False
         self.split_ratios = config['dataset'].get('split_ratios', [0.8, 0.1, 0.1])
+        
+        self.uncommon_ids = uncommon_ids
         
         self._logger = setup_logger(self.__class__.__name__)
         self._logger.debug(f"Initializing DataModule with config: {config}")
@@ -244,6 +246,7 @@ class DataModule(pl.LightningDataModule):
             full_dataset = self.dataset_class(
                 path=self.config['dataset']['path'],
                 context_length=self.config['model']['context_length'],
+                uncommon_ids=self.uncommon_ids,
                 template_miner=self.template_miner.transform,
                 tokenizer=self.tokenizer.transform,
                 test_mode=self.test_mode
@@ -346,8 +349,7 @@ class DataModule(pl.LightningDataModule):
             raise
 
 class TransformerLightning(pl.LightningModule):
-    def __init__(self, config: Dict[str, Any], model_cls: Any, config_name: Optional[str] = None, 
-                important_classes: torch.Tensor | None = None):
+    def __init__(self, config: Dict[str, Any], model_cls: Any, config_name: Optional[str] = None):
         super().__init__()
         self.save_hyperparameters(ignore=['class_weights'])
         
@@ -362,50 +364,20 @@ class TransformerLightning(pl.LightningModule):
         self.seq_len = config['model'].get('seq_len', 512)  # Assuming fixed sequence length
         self._logger.info(f"Model initialized with num_classes: {self.num_classes}, seq_len: {self.seq_len}")
         
-        # Important classes setup
-        if important_classes is not None:
-            self.important_classes = important_classes.long()
-            self._logger.debug(f"Important classes received: {self.important_classes.shape} "
-                            f"(min: {self.important_classes.min()}, max: {self.important_classes.max()})")
-        else:
-            self.important_classes = torch.tensor([], dtype=torch.long)
-            self._logger.debug("No important classes specified")
-        
-        self.importance_boost_factor = config['training'].get('importance_boost_factor', 15.0)
-        self._logger.debug(f"Using importance boost factor: {self.importance_boost_factor}")
-        
         # Initialize metrics
         self._logger.debug("Initializing metrics...")
         self._init_metrics()
         
-        # Verify important_classes are valid
-        if len(self.important_classes) > 0:
-            invalid = self.important_classes[(self.important_classes < 0) | 
-                                            (self.important_classes >= self.num_classes)]
-            if len(invalid) > 0:
-                error_msg = f"Invalid important_classes indices: {invalid.cpu().numpy()}"
-                self._logger.error(error_msg)
-                raise ValueError(error_msg)
-            self._logger.debug(f"Validated important classes (count: {len(self.important_classes)})")
-        
         # Loss function initialization
-        if config['model'].get('loss_fn', 'focal') == 'focal':
-            self._logger.debug("Initializing FocalLoss with: "
-                            f"gamma={config['training'].get('focal_gamma', 2.0)}, "
-                            f"reduction='mean'")
-            self.loss_fn = FocalLoss(
-                #alpha=self.class_weights,
-                gamma=config['training'].get('focal_gamma', 2.0),
-                reduction='mean'
-            )
-        elif config['model'].get('loss_fn', 'focal') == "crossentropy":
-            self._logger.debug("Initializing Cross-entropyloss")
-            self.loss_fn = FocalLoss(
-                #alpha=self.class_weights,
-                gamma=0,
-                reduction='mean'
-            )
-        
+        self._logger.debug("Initializing FocalLoss with: "
+                        f"gamma={config['training'].get('focal_gamma', 2.0)}, "
+                        f"reduction='mean'")
+        self.loss_fn = FocalLoss(
+            #alpha=self.class_weights,
+            gamma=config['training'].get('focal_gamma', 2.0),
+            reduction='mean'
+        )
+
         self._logger.info("Loss function initialized successfully")
         
         # Final initialization check
@@ -437,9 +409,6 @@ class TransformerLightning(pl.LightningModule):
             {
                 **base_metrics,
                 "bleu": LightningNGramScore(ngram_size=4),
-                "recall": torchmetrics.Recall(task='multiclass', num_classes=self.num_classes),
-                'precision': torchmetrics.Precision(task='multiclass', num_classes=self.num_classes),
-                "f1": torchmetrics.F1Score(task='multiclass', num_classes=self.num_classes, average='micro')
             },
             prefix="val/"
         )

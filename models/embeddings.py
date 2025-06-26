@@ -7,32 +7,40 @@ from pathlib import Path
 class Embeddings(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
-        model_cfg = config['model']
-        self.embed_dim: int = model_cfg['embed_dim']
+        self.model_cfg = config['model']
+        self.embed_dim: int = self.model_cfg['embed_dim']
         
         # Token embedding with padding_idx and scaling
         self.token_embedding = nn.Embedding(
-            num_embeddings=model_cfg['vocab_size'],
+            num_embeddings=self.model_cfg['vocab_size'],
             embedding_dim=self.embed_dim,
             padding_idx=0,  # Assuming 0 is padding index
             scale_grad_by_freq=config['training'].get('scale_grad_by_freq', False)
         )
         
         # Initialize embeddings properly
-        self._init_embeddings(model_cfg.get('embed_init', 'normal'))
+        self._init_embeddings(self.model_cfg.get('embed_init', 'normal'))
         
         # Positional embedding configuration
         self._init_positional_embeddings(config)
         
         # LayerNorm and Dropout
         self.layer_norm = nn.LayerNorm(self.embed_dim) if config['training'].get('pre_norm', True) else None
-        self.dropout = nn.Dropout(p=model_cfg.get('dropout', 0.1))
+        self.dropout = nn.Dropout(p=self.model_cfg.get('dropout', 0.1))
         
         # Mixed precision support
         self._autocast_kwargs = {
             'device_type': 'cuda' if torch.cuda.is_available() else 'cpu',
             'enabled': config['training'].get('mixed_precision', True)
         }
+        
+        self.bias_scale = nn.Parameter(
+            torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
+        )
+        
+        self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.embed_dim)
+        #self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.sequence_proj = nn.Linear(self.model_cfg['context_length'], 1)  
 
     def _init_embeddings(self, init_type: str) -> None:
         """Initialize embedding weights based on config."""
@@ -70,7 +78,7 @@ class Embeddings(nn.Module):
             except (ImportError, AttributeError) as e:
                 print(f"Warning: Could not initialize positional embeddings: {str(e)}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sequences: torch.Tensor) -> torch.Tensor:
         """Forward pass with optional mixed precision and normalization."""
         with torch.amp.autocast(**self._autocast_kwargs):
             # Token embeddings
@@ -84,6 +92,13 @@ class Embeddings(nn.Module):
             if self.position_embedding is not None:
                 positions = self.position_embedding(x)
                 x = x + positions.to(x.device)  # Ensure same device
+                
+            if self.model_cfg['bias_injection'] == "embedding":
+                embed = self.template_embed(sequences)
+                t_transposed = embed.permute(0, 3, 1, 2)     
+                hm = self.sequence_proj(t_transposed).squeeze(-1)
+                output = hm.permute(0, 2, 1)      
+                x = x + self.bias_scale * output
                 
             # Layer normalization before dropout if pre_norm
             if self.layer_norm is not None:

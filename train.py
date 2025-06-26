@@ -32,6 +32,21 @@ def return_model_cls(model: str, config):
         )
     raise f"{model} is not an available model"
 
+def load_lightning_checkpoint(ckpt_path, model):
+    """Load weights from Lightning checkpoint into PyTorch model"""
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
+    
+    # Handle different Lightning checkpoint formats
+    state_dict = checkpoint.get('state_dict', checkpoint)
+    
+    # Remove 'model.' prefix if present (common in Lightning checkpoints)
+    state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+    
+    # Load state dict
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
+
 def setup_logger(name: str | None = None) -> logging.Logger:
     """Setup logger that works with PyTorch Lightning."""
     logger = logging.getLogger(name or __name__)
@@ -57,8 +72,6 @@ def setup_logger(name: str | None = None) -> logging.Logger:
 
 # Usage:
 logger = setup_logger(__name__)
-
-important_errors = torch.tensor([42, 101], dtype=torch.long)
 
 def setup_environment(seed: int = 42) -> None:
     """Set up the training environment with reproducibility."""
@@ -131,8 +144,7 @@ def train_with_config(
         model = TransformerLightning(
             config, 
             return_model_cls(model, config),
-            config_name, 
-            important_classes=important_errors,
+            config_name
         )
 
         # Configure logger and callbacks

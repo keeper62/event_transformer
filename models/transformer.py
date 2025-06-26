@@ -69,7 +69,7 @@ class Transformer(nn.Module):
     def forward(self, x: torch.Tensor, sequences: List[List[int]]) -> torch.Tensor:
         """Forward pass with optional mixed precision."""
         with torch.amp.autocast(**self._autocast_kwargs):
-            x = self.embedding_layer(x)
+            x = self.embedding_layer(x, sequences)
             
             # Process through decoder layers
             for layer in self.decoder_layers:
