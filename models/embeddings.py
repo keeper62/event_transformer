@@ -35,8 +35,7 @@ class Embeddings(nn.Module):
         }
         
         self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.embed_dim)
-        #self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.sequence_proj = nn.Linear(self.model_cfg['context_length'], 1)  
+        self.bias_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.bias_scale = nn.Parameter(
             torch.tensor(self.model_cfg.get('bias_scale_init', 0.1))
         )
@@ -93,11 +92,8 @@ class Embeddings(nn.Module):
                 x = x + positions.to(x.device)  # Ensure same device
                 
             if self.model_cfg['bias_injection'] == "embedding":
-                embed = self.template_embed(sequences)
-                t_transposed = embed.permute(0, 3, 1, 2)     
-                hm = self.sequence_proj(t_transposed).squeeze(-1)
-                output = hm.permute(0, 2, 1)      
-                x = x + self.bias_scale * output
+                embed_bias = self.bias_proj(self.template_embed(sequences)).sum(dim=-2)    
+                x = x + self.bias_scale * embed_bias
                 
             # Layer normalization before dropout if pre_norm
             if self.layer_norm is not None:
