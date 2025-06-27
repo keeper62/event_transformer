@@ -25,11 +25,10 @@ class BaseAttention(nn.Module):
         self.out_proj = nn.Linear(self.dim, self.dim, bias=atten_cfg.get('out_bias', True))
         self.dropout = nn.Dropout(model_cfg['dropout'])
         
-        if self.bias_injection == "attention_attention":
-            self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.dim)
-            self.bias_scale = nn.Parameter(
-                torch.tensor(model_cfg.get('bias_scale_init', 0.1))
-            )
+        self.template_embed = nn.Embedding(config['tokenizer']['vocab_size'], self.dim)
+        self.bias_scale = nn.Parameter(
+            torch.tensor(model_cfg.get('bias_scale_init', 0.1))
+        )
         
         # Initialize parameters
         self._init_parameters()
